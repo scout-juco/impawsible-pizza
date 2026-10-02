@@ -1,0 +1,1542 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<title>Impawsible Pizza</title>
+<meta name="description" content="A one-button rhythm game. You are a cat climbing a chimney full of pizza.">
+<meta name="theme-color" content="#140a1c">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%8D%95%3C/text%3E%3C/svg%3E">
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #140a1c; }
+  body {
+    touch-action: none; overscroll-behavior: none;
+    -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; outline: none; cursor: pointer; }
+  noscript { position: fixed; inset: 0; display: grid; place-items: center; color: #fff; font: 600 18px system-ui, sans-serif; }
+</style>
+</head>
+<body>
+<canvas id="game" tabindex="0" aria-label="Impawsible Pizza. Press space, click, or tap to leap to the other wall of the chimney."></canvas>
+<noscript>Impawsible Pizza needs JavaScript to run.</noscript>
+<script>
+'use strict';
+
+/*SIM-START*/
+// ===== Deterministic simulation (shared with the level checker) =====
+// The chimney is a grid of 1x1 tiles, CFG.GW columns wide. x grows to the right; d is how far the cat has
+// climbed (row 0 is the bottom of the chimney). The cat climbs at a constant speed, clinging to whichever wall
+// it touches, and a tap kicks it across to the other side. If a wall ends, the cat keeps going that way until
+// it touches the next one. Running into the UNDERSIDE of a wall or box is a splat; slices and pizzas are
+// deadly from every side. At 8 rows/s and 120 BPM one beat is 4 rows, and crossing the standard 6-wide
+// shaft takes exactly one beat.
+const CFG = { DT: 1 / 240, CLIMB: 8, DASH: 10, COYOTE: 0.05, GW: 10, HB: 0.18, PIZZA_R: 0.38, M_AMP: 1.6, M_ROWS: 16 };
+const SLICE_HB = {                       // triangle hitboxes inside a tile
+  '>': [0, 0.25, 0, 0.75, 0.7, 0.5],     // slice stuck to a wall on its left, pointing right
+  '<': [1, 0.25, 1, 0.75, 0.3, 0.5],     // slice stuck to a wall on its right, pointing left
+};
+
+// Rows in climbing order (the first row is the bottom of the chimney), CFG.GW characters each.
+// # = chimney brick, B = pizza box (both solid), > < = slices on a wall, o = spinning pizza,
+// m = pizza swinging on an oven rack (it sits at its column when the cat reaches its row).
+// [n, row] repeats a row; { hue, name } starts a section.
+const LEVEL = (() => {
+  const S = '##......##', L = '##>.....##', R = '##.....<##', LR = '##>....<##';
+  const N = '###....###', NL = '###>...###', NR = '###...<###';
+  const T = '####..####', TL = '####>.####', TR = '####.<####';
+  const P = '##..BB..##', WIDE = '#........#';
+  return [
+    { hue: 14, name: 'THE OVEN' },
+    [16, S],
+    L, [7, S],
+    R, [7, S],
+    L, [7, S],
+    R, [9, S],
+    L, L, [8, S],
+    R, R, [8, S],
+    L, [3, S], R, [3, S], L, [3, S], R, [3, S], L, [11, S],
+
+    { hue: 205, name: 'SOOTY FLUE' },
+    '##..o...##', [3, S], L, [9, S],
+    '##...o..##', [3, S], R, [9, S],
+    '##B.....##', [7, S],
+    '##.....B##', [7, S],
+    '##BB....##', '##BB....##', [8, S],
+    '##....BB##', '##....BB##', [8, S],
+    '##..o...##', S, '##...o..##', [7, S],
+    LR, [7, S],
+    LR, [3, S], LR, [11, S],
+
+    { hue: 285, name: 'BOTTLENECK' },
+    [2, S], [3, '###.....##'], [6, N],
+    NL, [5, N], NR, [5, N], NL, [5, N], NR, [5, N],
+    [3, '####...###'], [5, T],
+    TL, [3, T], TR, [3, T], TL, [3, T], TR, [5, T],
+    [3, N], [5, S],
+    [8, P], '##>.BB..##', [3, P], '##..BB.<##', [3, P], '##.<BB..##', [3, P],
+    [8, S],
+
+    { hue: 48, name: 'CHEESE CAVES' },
+    [4, S],
+    '##..m...##', [7, S],
+    '##...m..##', [7, S],
+    '##..m...##', [3, S], '##...m..##', [7, S],
+    L, [2, S], '##...m..##', [4, S], R, [7, S],
+    '##..m...##', S, '##...m..##', [9, S],
+    LR, [3, S], '##..m...##', [3, S], LR, [9, S],
+
+    { hue: 352, name: 'PEPPERONI PIT' },
+    [2, S],
+    L, '##..o...##', [2, S], R, [7, S],
+    '##B....<##', [7, S],
+    '##>....B##', [7, S],
+    LR, [3, S], '##..o...##', [3, S], LR, [7, S],
+    [4, P], '##>.BB.<##', [3, P], [6, S],
+    '##..oo..##', [7, S],
+    L, [3, S], R, [3, S], '##..o...##', [3, S], L, [9, S],
+
+    { hue: 232, name: 'ROOFTOP RUN' },
+    [2, S],
+    L, [3, S], R, [3, S], L, [3, S], R, [3, S], L, [3, S], R, [3, S], L, [7, S],
+    [3, '###.....##'], [4, N], NL, [3, N], NR, [3, N], NL, [3, N], NR, [5, N],
+    [3, '####...###'], [3, T], TL, [2, T], TR, [2, T], TL, [2, T], TR, [4, T],
+    [3, N], [5, S],
+    '##..m...##', [3, S], LR, [7, S],
+    '##.o..o.##', [7, S],
+    LR, [3, S], LR, [3, S], LR, [9, S],
+    [16, WIDE],
+  ];
+})();
+
+function buildLevel(def) {
+  const rows = [], sections = [];
+  for (const d of def) {
+    if (typeof d === 'string') rows.push(d);
+    else if (Array.isArray(d)) for (let i = 0; i < d[0]; i++) rows.push(d[1]);
+    else sections.push({ d: rows.length, hue: d.hue, name: d.name || '' });
+  }
+  const lv = { rows, sections, end: rows.length, solid: [], tris: [], pizzas: [] };
+  rows.forEach((row, r) => {
+    if (row.length !== CFG.GW) throw new Error('Level row ' + r + ' is ' + row.length + ' wide: ' + row);
+    lv.solid[r] = [];
+    for (let c = 0; c < CFG.GW; c++) {
+      const ch = row[c], h = SLICE_HB[ch];
+      lv.solid[r][c] = ch === '#' || ch === 'B';
+      if (h) (lv.tris[r] || (lv.tris[r] = [])).push([c + h[0], r + h[1], c + h[2], r + h[3], c + h[4], r + h[5]]);
+      else if (ch === 'o' || ch === 'm') (lv.pizzas[r] || (lv.pizzas[r] = [])).push({ c, r, move: ch === 'm' });
+    }
+  });
+  return lv;
+}
+
+function solidAt(lv, c, r) {
+  if (c < 0 || c >= CFG.GW) return true;
+  return lv.solid[Math.max(0, Math.min(r, lv.end - 1))][c];   // walls continue past both ends
+}
+// Strict overlap: touching a face is not overlapping it.
+function solidIn(lv, x0, x1, y0, y1) {
+  const c0 = Math.floor(x0 + 1e-6), c1 = Math.ceil(x1 - 1e-6) - 1;
+  const r0 = Math.floor(y0 + 1e-6), r1 = Math.ceil(y1 - 1e-6) - 1;
+  for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) if (solidAt(lv, c, r)) return true;
+  return false;
+}
+function pizzaX(pz, t) {
+  return pz.c + 0.5 + (pz.move ? CFG.M_AMP * Math.sin(2 * Math.PI * (t * CFG.CLIMB - pz.r) / CFG.M_ROWS) : 0);
+}
+
+function newCat(lv) {
+  let x = 0;
+  while (x < CFG.GW - 1 && lv.solid[0][x]) x++;
+  return { x, d: 0, t: 0, dir: -1, cling: true, coyote: CFG.COYOTE, dead: false, won: false, flipped: false, landed: false };
+}
+
+// Separating-axis test: axis-aligned rect vs triangle [x1,y1,x2,y2,x3,y3].
+function rectTri(x0, y0, x1, y1, t) {
+  if (Math.max(t[0], t[2], t[4]) <= x0 || Math.min(t[0], t[2], t[4]) >= x1) return false;
+  if (Math.max(t[1], t[3], t[5]) <= y0 || Math.min(t[1], t[3], t[5]) >= y1) return false;
+  for (let i = 0; i < 6; i += 2) {
+    const nx = t[(i + 3) % 6] - t[i + 1], ny = t[i] - t[(i + 2) % 6];
+    let tmin = Infinity, tmax = -Infinity;
+    for (let j = 0; j < 6; j += 2) { const v = t[j] * nx + t[j + 1] * ny; if (v < tmin) tmin = v; if (v > tmax) tmax = v; }
+    const a = x0 * nx + y0 * ny, b = x1 * nx + y0 * ny, c = x0 * nx + y1 * ny, e = x1 * nx + y1 * ny;
+    if (Math.max(a, b, c, e) <= tmin || Math.min(a, b, c, e) >= tmax) return false;
+  }
+  return true;
+}
+
+// Advance one fixed step. `inf` inflates the hitboxes (the level checker uses it for safety margins).
+function stepCat(p, lv, tap, inf) {
+  const dt = CFG.DT;
+  inf = inf || 0;
+  p.flipped = p.landed = false;
+  if (tap && (p.cling || p.coyote > 0)) { p.dir = -p.dir; p.cling = false; p.coyote = 0; p.flipped = true; }
+  p.t += dt;
+  p.d += CFG.CLIMB * dt;
+  if (solidIn(lv, p.x, p.x + 1, p.d, p.d + 1 + inf)) { p.dead = true; return; }   // bonked into an underside
+  if (p.cling) {
+    const c = Math.round(p.x) + (p.dir > 0 ? 1 : -1);
+    if (!solidIn(lv, c, c + 1, p.d, p.d + 1)) p.cling = false;                       // wall ended: keep going
+  }
+  if (!p.cling) {
+    p.x += p.dir * CFG.DASH * dt;
+    if (solidIn(lv, p.x, p.x + 1, p.d, p.d + 1)) {
+      p.x = p.dir > 0 ? Math.floor(p.x + 1 - 1e-6) - 1 : Math.floor(p.x + 1e-6) + 1;
+      p.cling = true; p.landed = true;
+    }
+  }
+  p.coyote = p.cling ? CFG.COYOTE : Math.max(0, p.coyote - dt);
+
+  const k = CFG.HB - inf, x0 = p.x + k, x1 = p.x + 1 - k, y0 = p.d + k, y1 = p.d + 1 - k;
+  for (let r = Math.floor(p.d) - 1; r <= Math.floor(p.d) + 2; r++) {
+    const tris = lv.tris[r];
+    if (tris) for (let i = 0; i < tris.length; i++) if (rectTri(x0, y0, x1, y1, tris[i])) { p.dead = true; return; }
+    const pzs = lv.pizzas[r];
+    if (pzs) for (let i = 0; i < pzs.length; i++) {
+      const cx = pizzaX(pzs[i], p.t), cy = r + 0.5;
+      const nx = Math.max(x0, Math.min(cx, x1)) - cx, ny = Math.max(y0, Math.min(cy, y1)) - cy;
+      if (nx * nx + ny * ny < CFG.PIZZA_R * CFG.PIZZA_R) { p.dead = true; return; }
+    }
+  }
+  if (p.d + 1 >= lv.end) p.won = true;
+}
+/*SIM-END*/
+
+// ===== Helpers =====
+const FONT = 'ui-rounded, "SF Pro Rounded", "Arial Rounded MT Bold", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
+const TAU = Math.PI * 2;
+const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
+const lerp = (a, b, t) => a + (b - a) * t;
+const ease = t => t * t * (3 - 2 * t);
+const hueLerp = (a, b, t) => (a + ((((b - a) % 360) + 540) % 360 - 180) * t + 360) % 360;
+function rng(seed) { return () => ((seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0) / 4294967296); }
+function rr(g, x, y, w, h, r) {
+  g.beginPath();
+  if (!(w > 0 && h > 0)) return;
+  r = Math.max(0, Math.min(r, w / 2, h / 2));
+  g.moveTo(x + r, y);
+  g.arcTo(x + w, y, x + w, y + h, r); g.arcTo(x + w, y + h, x, y + h, r);
+  g.arcTo(x, y + h, x, y, r); g.arcTo(x, y, x + w, y, r); g.closePath();
+}
+
+const store = {   // best-effort: storage can be blocked inside some embeds
+  get(k, d) { try { const v = localStorage.getItem('impawsible:' + k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } },
+  set(k, v) { try { localStorage.setItem('impawsible:' + k, JSON.stringify(v)); } catch (e) {} },
+};
+const storedInt = k => Math.max(0, store.get(k, 0) | 0);
+
+const SKINS = [
+  { name: 'Ginger',   body: '#f39a3d', dark: '#c25d1b', belly: '#ffe3c2', eye: '#5fd068', stripes: true,  whisker: 'rgba(255,255,255,.85)' },
+  { name: 'Midnight', body: '#2e2c3a', dark: '#1a1922', belly: '#4a4760', eye: '#ffd23f', stripes: false, whisker: 'rgba(255,255,255,.75)' },
+  { name: 'Smoke',    body: '#9ca4b2', dark: '#6b7381', belly: '#e4e7ec', eye: '#5ec4f0', stripes: true,  whisker: 'rgba(255,255,255,.85)' },
+  { name: 'Snowball', body: '#f7f3eb', dark: '#ddd2c1', belly: '#ffffff', eye: '#6aa8ff', stripes: false, whisker: 'rgba(120,110,100,.8)' },
+];
+
+// ===== Canvas & layout =====
+const cvs = document.getElementById('game');
+const ctx = cvs.getContext('2d');
+let W = 1, H = 1, DPR = 1, TS = 40, UI = 1;
+const SPR = {}, PAT = {};
+const PAD = 0.12;
+const PAPER = '#f4ecdb', INK = '#3b2a20';
+let spriteTimer = 0, spritesBuilt = false;
+
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = Math.max(1, cvs.clientWidth || window.innerWidth);
+  H = Math.max(1, cvs.clientHeight || window.innerHeight);
+  cvs.width = Math.round(W * DPR); cvs.height = Math.round(H * DPR);
+  TS = Math.max(10, Math.floor(Math.min(H / 13, W / (CFG.GW + 1))));
+  UI = clamp(Math.min(W, H) / 560, 0.65, 1.5);
+  // Painting sprites takes a moment, so while a window is being dragged the old ones are reused (scaled).
+  clearTimeout(spriteTimer);
+  if (!spritesBuilt) buildSprites(); else spriteTimer = setTimeout(buildSprites, 150);
+}
+
+// ===== Watercolour =====
+// Everything is first drawn crisply, then "painted" once: edges wobble, pigment pools darker where a
+// wash ends or two colours meet, colours bleed softly and the pigment granulates. A paper texture
+// is laid over the whole screen every frame.
+function hash2(x, y, s) {
+  let h = Math.imul(x | 0, 374761393) ^ Math.imul(y | 0, 668265263) ^ Math.imul(s | 0, 1442695041);
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
+function vnoise(x, y, s, px, py) {   // smooth value noise in [0,1]; periodic when px / py are given
+  const xi = Math.floor(x), yi = Math.floor(y), u = x - xi, v = y - yi;
+  const X = i => (px ? ((i % px) + px) % px : i), Y = i => (py ? ((i % py) + py) % py : i);
+  const a = hash2(X(xi), Y(yi), s), b = hash2(X(xi + 1), Y(yi), s);
+  const c = hash2(X(xi), Y(yi + 1), s), d = hash2(X(xi + 1), Y(yi + 1), s);
+  const su = u * u * (3 - 2 * u), sv = v * v * (3 - 2 * v);
+  return a + (b - a) * su + (c - a) * sv + (a - b - c + d) * su * sv;
+}
+function noiseLayer(w, h, cell, seed, tile) {   // noise sampled in pixels, seamless across the canvas if `tile`
+  const nx = tile ? Math.max(1, Math.round(w / cell)) : 0, ny = tile ? Math.max(1, Math.round(h / cell)) : 0;
+  const fx = tile ? nx / w : 1 / cell, fy = tile ? ny / h : 1 / cell;
+  return (x, y) => vnoise(x * fx, y * fy, seed, nx, ny);
+}
+function boxBlur(src, w, h, r, wrap) {
+  const tmp = new Float32Array(w * h), out = new Float32Array(w * h), k = 1 / (2 * r + 1);
+  const at = (i, n) => (wrap ? ((i % n) + n) % n : i < 0 ? 0 : i >= n ? n - 1 : i);
+  for (let y = 0; y < h; y++) {
+    const row = y * w;
+    let acc = 0;
+    for (let i = -r; i <= r; i++) acc += src[row + at(i, w)];
+    for (let x = 0; x < w; x++) { tmp[row + x] = acc * k; acc += src[row + at(x + r + 1, w)] - src[row + at(x - r, w)]; }
+  }
+  for (let x = 0; x < w; x++) {
+    let acc = 0;
+    for (let i = -r; i <= r; i++) acc += tmp[at(i, h) * w + x];
+    for (let y = 0; y < h; y++) { out[y * w + x] = acc * k; acc += tmp[at(y + r + 1, h) * w + x] - tmp[at(y - r, h) * w + x]; }
+  }
+  return out;
+}
+function watercolorize(cv, o) {
+  const w = cv.width, h = cv.height, g = cv.getContext('2d');
+  if (w < 4 || h < 4) return cv;
+  const img = g.getImageData(0, 0, w, h), d = img.data, n = w * h;
+  const seed = o.seed || 1, tile = !!o.tile, amp = o.wobble || 0, cell = Math.max(2, o.cell || 12);
+  const wobX = noiseLayer(w, h, cell, seed, tile), wobY = noiseLayer(w, h, cell, seed + 97, tile);
+  const gran = noiseLayer(w, h, Math.max(2, o.granCell || 3), seed + 11, tile), wash = noiseLayer(w, h, cell * 3, seed + 23, tile);
+  // 1. wobble the edges (premultiplied colour)
+  const A = new Float32Array(n), R = new Float32Array(n), Gc = new Float32Array(n), B = new Float32Array(n);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    let qx = x, qy = y;
+    if (amp) {
+      qx = Math.round(x + (wobX(x, y) - 0.5) * 2 * amp); qy = Math.round(y + (wobY(x, y) - 0.5) * 2 * amp);
+      if (tile) { qx = ((qx % w) + w) % w; qy = ((qy % h) + h) % h; }
+      else if (qx < 0 || qy < 0 || qx >= w || qy >= h) continue;
+    }
+    const j = (qy * w + qx) * 4, i = y * w + x, a = d[j + 3] / 255;
+    A[i] = a; R[i] = d[j] * a; Gc[i] = d[j + 1] * a; B[i] = d[j + 2] * a;
+  }
+  // 2. bleed, pooling at edges and seams, granulation, uneven wash
+  const r = Math.max(1, Math.round(o.blur || 2));
+  const Ab = boxBlur(A, w, h, r, tile), Rb = boxBlur(R, w, h, r, tile), Gb = boxBlur(Gc, w, h, r, tile), Bb = boxBlur(B, w, h, r, tile);
+  const edgeK = o.edge == null ? 0.55 : o.edge, bleed = o.bleed == null ? 0.35 : o.bleed;
+  const granK = o.gran == null ? 0.14 : o.gran, washK = o.wash == null ? 0.15 : o.wash, alpha = o.alpha == null ? 1 : o.alpha;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = y * w + x, a = A[i] + (Ab[i] - A[i]) * bleed;
+    if (a < 0.004) { d[i * 4 + 3] = 0; continue; }
+    const rim = Math.max(0, A[i] - Ab[i]) * 2.4;
+    const seam = (Math.abs(R[i] - Rb[i]) + Math.abs(Gc[i] - Gb[i]) + Math.abs(B[i] - Bb[i])) / 255;
+    const k = (1 - edgeK * Math.min(1, rim + seam * 1.2)) * (1 - granK * (0.6 * hash2(x, y, seed + 5) + 0.4 * gran(x, y))) / a;
+    d[i * 4] = Math.min(255, (R[i] + (Rb[i] - R[i]) * bleed) * k);
+    d[i * 4 + 1] = Math.min(255, (Gc[i] + (Gb[i] - Gc[i]) * bleed) * k);
+    d[i * 4 + 2] = Math.min(255, (B[i] + (Bb[i] - B[i]) * bleed) * k);
+    d[i * 4 + 3] = Math.min(255, a * (1 - washK * wash(x, y)) * alpha * 255);
+  }
+  g.putImageData(img, 0, 0);
+  return cv;
+}
+function makeCanvas(w, h) { const c = document.createElement('canvas'); c.width = Math.max(1, w); c.height = Math.max(1, h); return c; }
+function makePattern(canvas, cssPerPx) {
+  const p = ctx.createPattern(canvas, 'repeat');
+  try { p.setTransform(new DOMMatrix([cssPerPx, 0, 0, cssPerPx, 0, 0])); } catch (e) { /* older browsers: texture just renders at a different scale */ }
+  return p;
+}
+
+// Paper grain: seamless, mostly white, laid over everything with 'multiply'. Built once.
+function makePaper() {
+  const size = 512, c = makeCanvas(size, size), g = c.getContext('2d'), img = g.createImageData(size, size), d = img.data;
+  const fine = noiseLayer(size, size, 6, 71, true), blot = noiseLayer(size, size, 64, 72, true);
+  for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+    const v = 1 - 0.045 * hash2(x, y, 70) - 0.05 * fine(x, y) - 0.05 * blot(x, y), i = (y * size + x) * 4;
+    d[i] = 255 * v; d[i + 1] = 252 * v; d[i + 2] = 244 * v; d[i + 3] = 255;
+  }
+  g.putImageData(img, 0, 0);
+  const R = rng(73);
+  g.strokeStyle = 'rgba(110,90,70,.07)'; g.lineWidth = 1;
+  for (let i = 0; i < 140; i++) {   // paper fibres, drawn on all wrapped copies so the tile stays seamless
+    const x = R() * size, y = R() * size, a = R() * TAU, l = 6 + R() * 18, b = (R() - 0.5) * 8;
+    for (const ox of [-size, 0, size]) for (const oy of [-size, 0, size]) {
+      g.beginPath(); g.moveTo(x + ox, y + oy);
+      g.quadraticCurveTo(x + ox + Math.cos(a) * l / 2 - Math.sin(a) * b, y + oy + Math.sin(a) * l / 2 + Math.cos(a) * b, x + ox + Math.cos(a) * l, y + oy + Math.sin(a) * l);
+      g.stroke();
+    }
+  }
+  return c;
+}
+// Soft cloudy blotches for uneven washes (back wall, sky). Built once, scaled up when drawn.
+function makeWash() {
+  const size = 384, c = makeCanvas(size, size), g = c.getContext('2d'), img = g.createImageData(size, size), d = img.data;
+  const n1 = noiseLayer(size, size, 96, 81, true), n2 = noiseLayer(size, size, 48, 82, true), n3 = noiseLayer(size, size, 16, 83, true);
+  for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+    const f = 0.55 * n1(x, y) + 0.3 * n2(x, y) + 0.15 * n3(x, y);
+    const v = 1 - 0.28 * Math.max(0, f - 0.25), i = (y * size + x) * 4;
+    d[i] = 255 * v; d[i + 1] = 253 * v; d[i + 2] = 248 * v; d[i + 3] = 255;
+  }
+  g.putImageData(img, 0, 0);
+  return c;
+}
+// Loosely painted bricks (2x2 tiles, seamless, neutral): 'multiply' them over a wall's colour to tint them.
+function makeBricks() {
+  const s = TS * DPR, size = Math.max(8, Math.round(2 * s)), c = makeCanvas(size, size), g = c.getContext('2d'), R = rng(41);
+  g.fillStyle = '#fff'; g.fillRect(0, 0, size, size);
+  const bh = size / 4, bw = size / 2, m = Math.max(1, s * 0.06);
+  for (let row = 0; row < 4; row++) for (let k = 0; k < 2; k++) {
+    const x0 = k * bw + (row % 2) * bw / 2, y0 = row * bh, shade = 0.74 + R() * 0.18;
+    g.fillStyle = `rgb(${Math.round(250 * shade)},${Math.round(236 * shade)},${Math.round(222 * shade)})`;
+    for (const ox of [0, -size]) g.fillRect(x0 + ox + m / 2, y0 + m / 2, bw - m, bh - m);
+  }
+  return watercolorize(c, { seed: 42, tile: true, wobble: s * 0.035, cell: s * 0.3, blur: Math.max(1, s * 0.03), edge: 0.6, gran: 0.22, wash: 0 });
+}
+
+// ===== Sprites =====
+function sprite(draw) {
+  const s = TS * DPR, size = Math.max(2, Math.ceil((1 + PAD * 2) * s));
+  const c = makeCanvas(size, size), g = c.getContext('2d'); g.scale(s, s); g.translate(PAD, PAD); draw(g);
+  return c;
+}
+function paintSprite(draw, seed, o) {
+  const px = TS * DPR;
+  return watercolorize(sprite(draw), Object.assign({ seed, wobble: px * 0.022, cell: px * 0.16, blur: Math.max(1, px * 0.022), edge: 0.5, gran: 0.14, wash: 0.12 }, o));
+}
+
+function drawSlice(g) {   // unit tile, y down, tip at the top, crust at the bottom
+  g.lineJoin = 'round'; g.lineCap = 'round';
+  g.beginPath(); g.moveTo(0.5, 0.08); g.lineTo(0.9, 0.84); g.lineTo(0.1, 0.84); g.closePath();
+  g.fillStyle = '#f6c453'; g.fill();
+  g.fillStyle = '#d9583a';
+  g.beginPath(); g.moveTo(0.14, 0.77); g.lineTo(0.86, 0.77); g.lineTo(0.9, 0.84); g.lineTo(0.1, 0.84); g.closePath(); g.fill();
+  g.beginPath(); g.moveTo(0.5, 0.08); g.lineTo(0.9, 0.84); g.lineTo(0.1, 0.84); g.closePath();
+  g.strokeStyle = '#5a2a12'; g.lineWidth = 0.055; g.stroke();
+  for (const [x, y, r] of [[0.5, 0.38, 0.075], [0.37, 0.62, 0.08], [0.62, 0.64, 0.075]]) {
+    g.fillStyle = '#c0392b'; g.beginPath(); g.arc(x, y, r, 0, TAU); g.fill();
+  }
+  g.fillStyle = '#4c9a4a'; g.beginPath(); g.ellipse(0.52, 0.52, 0.045, 0.022, -0.6, 0, TAU); g.fill();
+  rr(g, 0.05, 0.79, 0.9, 0.19, 0.095); g.fillStyle = '#d28a4c'; g.fill();
+  g.strokeStyle = '#5a2a12'; g.lineWidth = 0.055; g.stroke();
+}
+
+function drawPizza(g) {    // a whole pizza, centred in the unit tile
+  g.beginPath(); g.arc(0.5, 0.5, 0.44, 0, TAU); g.fillStyle = '#d28a4c'; g.fill();
+  g.strokeStyle = '#5a2a12'; g.lineWidth = 0.055; g.stroke();
+  g.beginPath(); g.arc(0.5, 0.5, 0.35, 0, TAU); g.fillStyle = '#f6c453'; g.fill();
+  g.fillStyle = '#c0392b';
+  for (const [a, k] of [[0.2, 0.2], [1.5, 0.22], [2.7, 0.21], [3.9, 0.2], [5.1, 0.22]]) {
+    g.beginPath(); g.arc(0.5 + Math.cos(a) * k, 0.5 + Math.sin(a) * k, 0.065, 0, TAU); g.fill();
+  }
+  g.beginPath(); g.arc(0.5, 0.5, 0.055, 0, TAU); g.fill();
+  g.strokeStyle = 'rgba(90,42,18,.5)'; g.lineWidth = 0.025; g.beginPath();
+  for (let i = 0; i < 3; i++) { const a = i * Math.PI / 3; g.moveTo(0.5 + Math.cos(a) * 0.35, 0.5 + Math.sin(a) * 0.35); g.lineTo(0.5 - Math.cos(a) * 0.35, 0.5 - Math.sin(a) * 0.35); }
+  g.stroke();
+}
+
+function drawBox(g) {     // a 1x1 stack of two pizza boxes
+  for (let i = 0; i < 2; i++) {
+    const y = i * 0.5;
+    rr(g, 0.01, y + 0.015, 0.98, 0.47, 0.05);
+    g.fillStyle = i ? '#c99863' : '#d8ab76'; g.fill();
+    g.strokeStyle = '#5e3816'; g.lineWidth = 0.04; g.stroke();
+    g.strokeStyle = 'rgba(94,56,22,.5)'; g.lineWidth = 0.03;
+    g.beginPath(); g.moveTo(0.06, y + 0.15); g.lineTo(0.94, y + 0.15); g.stroke();
+    rr(g, 0.33, y + 0.23, 0.34, 0.17, 0.04); g.fillStyle = '#d4483a'; g.fill();
+    g.fillStyle = '#fbf1dc';
+    g.beginPath(); g.moveTo(0.5, y + 0.26); g.lineTo(0.56, y + 0.37); g.lineTo(0.44, y + 0.37); g.closePath(); g.fill();
+  }
+}
+
+function buildSprites() {
+  spritesBuilt = true;
+  painted.clear();
+  const rot = a => g => { g.translate(0.5, 0.5); g.rotate(a); g.translate(-0.5, -0.5); drawSlice(g); };
+  SPR['>'] = paintSprite(rot(Math.PI / 2), 11);
+  SPR['<'] = paintSprite(rot(-Math.PI / 2), 12);
+  SPR['^'] = paintSprite(drawSlice, 13);
+  SPR.pizza = paintSprite(drawPizza, 14);
+  SPR.B = paintSprite(drawBox, 15, { wobble: TS * DPR * 0.014 });
+  const mpx = Math.max(8, Math.min(W, H) * 0.16 * DPR), mc = makeCanvas(Math.ceil(mpx * (1 + 2 * PAD)), Math.ceil(mpx * (1 + 2 * PAD))), mg = mc.getContext('2d');
+  mg.scale(mpx, mpx); mg.translate(PAD, PAD); drawPizza(mg);
+  SPR.moon = watercolorize(mc, { seed: 16, wobble: mpx * 0.018, cell: mpx * 0.14, blur: Math.max(1, mpx * 0.018), edge: 0.5, gran: 0.16, wash: 0.15 });
+  buildCat();
+  PAT.bricks = makePattern(makeBricks(), 1 / DPR);
+  if (!SPR.paper) { SPR.paper = makePaper(); SPR.wash = makeWash(); }
+  PAT.paper = makePattern(SPR.paper, 1 / DPR);
+  PAT.wash = makePattern(SPR.wash, TS * 6 / 384);
+}
+
+// ===== The cat =====
+// The cat is pre-painted per skin: 8 frames of its scrabbling legs, a mid-leap pose and a blink.
+// Each frame is painted with its own seed, so the outline "boils" gently like a hand-drawn cartoon.
+const CAT_HALF = 0.8;   // a cat frame covers ±0.8 tiles around the cat's centre
+function buildCat() {
+  const s = SKINS[G.skin], px = TS * DPR, size = Math.ceil(CAT_HALF * 2 * px);
+  const frame = (ph, air, blink, seed) => {
+    const c = makeCanvas(size, size), g = c.getContext('2d');
+    g.scale(px, px); g.translate(CAT_HALF, CAT_HALF);
+    drawCat(g, s, ph, air, blink);
+    return watercolorize(c, { seed, wobble: px * 0.02, cell: px * 0.14, blur: Math.max(1, px * 0.02), edge: 0.45, gran: 0.12, wash: 0.1 });
+  };
+  SPR.cat = { run: [], air: frame(0, true, false, 900), blink: frame(0, false, true, 901) };
+  for (let i = 0; i < 8; i++) SPR.cat.run.push(frame(i / 8 * TAU, false, false, 910 + i));
+}
+
+function drawCat(g, s, ph, air, blink) {
+  const O = '#4a2c1c';   // sepia ink
+  g.lineJoin = 'round'; g.lineCap = 'round';
+  const tw = Math.sin(ph * 0.5) * 0.05;
+  g.beginPath(); g.moveTo(-0.32, 0.1); g.quadraticCurveTo(-0.66, 0.08 + tw, -0.58, -0.24 + tw);
+  g.strokeStyle = O; g.lineWidth = 0.16; g.stroke();
+  g.strokeStyle = s.body; g.lineWidth = 0.085; g.stroke();
+
+  const legs = [[-0.24, Math.PI, 0, s.dark], [0.2, 0, 1, s.dark], [-0.12, 0, 0, s.body], [0.32, Math.PI, 1, s.body]];
+  for (const [lx, off, front, col] of legs) {
+    let dx, lift;
+    if (air) { dx = front ? 0.08 : -0.08; lift = 0.04; }
+    else { const a = ph + off; dx = Math.sin(a) * 0.075; lift = Math.max(0, Math.cos(a)) * 0.07; }
+    rr(g, lx + dx - 0.055, 0.24 - lift, 0.11, 0.26, 0.055);
+    g.fillStyle = col; g.fill(); g.lineWidth = 0.035; g.strokeStyle = O; g.stroke();
+  }
+
+  g.beginPath(); g.ellipse(-0.03, 0.15, 0.37, 0.2, 0, 0, TAU);
+  g.fillStyle = s.body; g.fill();
+  g.save(); g.clip();
+  g.fillStyle = s.belly; g.beginPath(); g.ellipse(0.02, 0.33, 0.3, 0.11, 0, 0, TAU); g.fill();
+  if (s.stripes) {
+    g.strokeStyle = s.dark; g.lineWidth = 0.055;
+    for (let i = 0; i < 3; i++) { const x = -0.28 + i * 0.13; g.beginPath(); g.moveTo(x, -0.08); g.quadraticCurveTo(x + 0.05, 0.03, x, 0.12); g.stroke(); }
+  }
+  g.restore();
+  g.beginPath(); g.ellipse(-0.03, 0.15, 0.37, 0.2, 0, 0, TAU);
+  g.lineWidth = 0.04; g.strokeStyle = O; g.stroke();
+
+  const ear = (ax, ay, tx, ty, bx, by) => {
+    g.beginPath(); g.moveTo(ax, ay); g.lineTo(tx, ty); g.lineTo(bx, by); g.closePath();
+    g.fillStyle = s.body; g.fill(); g.lineWidth = 0.035; g.strokeStyle = O; g.stroke();
+    const cx = (ax + tx + bx) / 3, cy = (ay + ty + by) / 3, k = 0.5;
+    g.beginPath(); g.moveTo(cx + (ax - cx) * k, cy + (ay - cy) * k); g.lineTo(cx + (tx - cx) * k, cy + (ty - cy) * k);
+    g.lineTo(cx + (bx - cx) * k, cy + (by - cy) * k); g.closePath(); g.fillStyle = '#f2a3a8'; g.fill();
+  };
+  ear(0.08, -0.2, 0.11, -0.46, 0.27, -0.31);
+  ear(0.32, -0.32, 0.47, -0.46, 0.5, -0.19);
+  g.beginPath(); g.arc(0.29, -0.1, 0.235, 0, TAU);
+  g.fillStyle = s.body; g.fill(); g.lineWidth = 0.04; g.strokeStyle = O; g.stroke();
+  if (s.stripes) {
+    g.strokeStyle = s.dark; g.lineWidth = 0.04;
+    g.beginPath(); g.moveTo(0.24, -0.32); g.lineTo(0.26, -0.24); g.moveTo(0.31, -0.33); g.lineTo(0.31, -0.25); g.stroke();
+  }
+  g.fillStyle = s.belly; g.beginPath(); g.ellipse(0.41, -0.015, 0.1, 0.075, 0, 0, TAU); g.fill();
+
+  for (const ex of [0.22, 0.37]) {
+    const ey = -0.135;
+    if (blink) {
+      g.strokeStyle = O; g.lineWidth = 0.03;
+      g.beginPath(); g.moveTo(ex - 0.045, ey); g.quadraticCurveTo(ex, ey + 0.03, ex + 0.045, ey); g.stroke();
+      continue;
+    }
+    g.fillStyle = s.eye; g.beginPath(); g.ellipse(ex, ey, 0.05, 0.065, 0, 0, TAU); g.fill();
+    g.fillStyle = '#1d1410'; g.beginPath(); g.ellipse(ex + 0.01, ey, air ? 0.034 : 0.02, 0.052, 0, 0, TAU); g.fill();
+    g.fillStyle = '#fffaf0'; g.beginPath(); g.arc(ex + 0.022, ey - 0.03, 0.015, 0, TAU); g.fill();
+  }
+  g.fillStyle = '#e8798c';
+  g.beginPath(); g.moveTo(0.44, -0.05); g.lineTo(0.5, -0.05); g.lineTo(0.47, -0.015); g.closePath(); g.fill();
+  g.strokeStyle = O; g.lineWidth = 0.022;
+  g.beginPath(); g.moveTo(0.47, -0.015); g.quadraticCurveTo(0.455, 0.025, 0.425, 0.015);
+  g.moveTo(0.47, -0.015); g.quadraticCurveTo(0.485, 0.025, 0.515, 0.015); g.stroke();
+  g.strokeStyle = s.whisker; g.lineWidth = 0.016;
+  g.beginPath(); g.moveTo(0.5, -0.005); g.lineTo(0.66, -0.045); g.moveTo(0.5, 0.015); g.lineTo(0.67, 0.025); g.stroke();
+}
+
+// ===== Audio: a tiny chiptune sequencer + synthesized meows =====
+const BPM = 120, SIX = 60 / BPM / 4, MUSIC_LEAD = 0.05;
+const music = { on: false, step: 0, next: 0, t0: 0 };
+const mtof = m => 440 * Math.pow(2, (m - 69) / 12);
+const CHORDS = [[57, 60, 64], [53, 57, 60], [60, 64, 67], [55, 59, 62]];   // Am F C G
+const ARP = [0, 1, 2, 3, 2, 1, 0, 1, 2, 3, 2, 1, 0, 2, 1, 3];
+const MELODY = [
+  [[0, 76, 3], [3, 72, 1], [4, 69, 2], [6, 72, 2], [8, 76, 2], [10, 77, 2], [12, 76, 4]],
+  [[0, 77, 3], [3, 76, 1], [4, 72, 2], [6, 69, 2], [8, 72, 2], [10, 74, 2], [12, 72, 4]],
+  [[0, 79, 3], [3, 76, 1], [4, 72, 2], [6, 76, 2], [8, 79, 2], [10, 81, 2], [12, 79, 4]],
+  [[0, 74, 3], [3, 71, 1], [4, 67, 2], [6, 71, 2], [8, 74, 2], [10, 79, 2], [12, 74, 2], [14, 71, 2]],
+];
+let AC = null, master = null, noiseBuf = null, musicBus = null;
+let muted = !!store.get('muted', false);
+const storedVol = Number(store.get('musicVol', 0.8));
+let musicVol = Number.isFinite(storedVol) ? clamp(storedVol, 0, 1) : 0.8;
+const musicGain = () => 0.9 * musicVol * musicVol;   // squared so the slider feels even to the ear
+
+// Called from every user gesture. Touch browsers only let audio start on the *release* of a tap
+// (pointerup / touchend), so this runs on those too.
+function initAudio() {
+  if (AC) { if (AC.state === 'suspended' && G.mode !== 'pause' && !document.hidden) AC.resume(); return; }
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  if (!Ctx) return;
+  try { AC = new Ctx(); } catch (e) { return; }
+  master = AC.createGain(); master.gain.value = muted ? 0 : 0.5;
+  const comp = AC.createDynamicsCompressor();
+  master.connect(comp); comp.connect(AC.destination);
+  noiseBuf = AC.createBuffer(1, AC.sampleRate, AC.sampleRate);
+  const d = noiseBuf.getChannelData(0);
+  for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  // If the clock only starts after the run began (touch unlock), line the beat back up with the run.
+  AC.onstatechange = () => { if (AC.state === 'running') reanchorMusic(); };
+}
+
+function voice(t, f, dur, type, vol, lp, dest) {
+  const o = AC.createOscillator(), g = AC.createGain();
+  o.type = type; o.frequency.setValueAtTime(f, t);
+  g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(vol, t + 0.008);
+  g.gain.setValueAtTime(vol, t + Math.max(0.01, dur * 0.6)); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  let n = o;
+  if (lp) { const fl = AC.createBiquadFilter(); fl.type = 'lowpass'; fl.frequency.value = lp; o.connect(fl); n = fl; }
+  n.connect(g); g.connect(dest);
+  o.start(t); o.stop(t + dur + 0.05);
+}
+function noise(t, dur, vol, type, freq, dest) {
+  const s = AC.createBufferSource(), f = AC.createBiquadFilter(), g = AC.createGain();
+  s.buffer = noiseBuf; f.type = type; f.frequency.setValueAtTime(freq, t);
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  s.connect(f); f.connect(g); g.connect(dest);
+  s.start(t, Math.random() * 0.5); s.stop(t + dur + 0.02);
+  return f;
+}
+function kick(t, dest) {
+  const o = AC.createOscillator(), g = AC.createGain();
+  o.frequency.setValueAtTime(160, t); o.frequency.exponentialRampToValueAtTime(42, t + 0.13);
+  g.gain.setValueAtTime(0.9, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.22);
+  o.connect(g); g.connect(dest); o.start(t); o.stop(t + 0.25);
+}
+function meow(t, pitch) {
+  const o = AC.createOscillator(), f = AC.createBiquadFilter(), g = AC.createGain();
+  o.type = 'sawtooth'; f.type = 'bandpass'; f.Q.value = 3.5;
+  o.frequency.setValueAtTime(430 * pitch, t);
+  o.frequency.linearRampToValueAtTime(640 * pitch, t + 0.13);
+  o.frequency.linearRampToValueAtTime(360 * pitch, t + 0.48);
+  f.frequency.setValueAtTime(900, t);
+  f.frequency.linearRampToValueAtTime(2300, t + 0.15);
+  f.frequency.linearRampToValueAtTime(750, t + 0.48);
+  g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.4, t + 0.04);
+  g.gain.setValueAtTime(0.4, t + 0.26); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.52);
+  o.connect(f); f.connect(g); g.connect(master);
+  o.start(t); o.stop(t + 0.55);
+}
+
+function playStep(i, t) {
+  const bar = Math.floor(i / 16), s = i % 16, b = bar % 32, ch = CHORDS[bar % 4], dest = musicBus;
+  const brk = b >= 24 && b < 28;                         // short breakdown every 32 bars
+  if (!brk && s % 4 === 0) kick(t, dest);
+  if (bar >= 4 && !brk && (s === 4 || s === 12)) { noise(t, 0.14, 0.32, 'highpass', 1500, dest); voice(t, 190, 0.08, 'triangle', 0.16, 0, dest); }
+  if (bar >= 2) noise(t, 0.035, s % 4 === 2 ? 0.14 : 0.05, 'highpass', 7500, dest);
+  if (!brk && s % 2 === 0) voice(t, mtof(ch[0] - 12 + (s === 6 || s === 14 ? 12 : 0)), SIX * 1.7, 'sawtooth', 0.15, 700, dest);
+  if (bar >= 2) voice(t, mtof([ch[0], ch[1], ch[2], ch[0] + 12][ARP[s]] + 12), SIX * 0.9, 'square', brk ? 0.07 : 0.04, 2600, dest);
+  if (bar >= 8 && !brk) for (const [st, n, len] of MELODY[bar % 4]) if (st === s) voice(t, mtof(n), SIX * len * 0.95, 'square', 0.065, 3200, dest);
+}
+function musicStart() {
+  if (!AC) return;
+  musicStop();
+  musicBus = AC.createGain(); musicBus.gain.value = musicGain(); musicBus.connect(master);
+  music.on = true; music.step = 0; music.t0 = music.next = AC.currentTime + MUSIC_LEAD;
+}
+function musicStop() {
+  music.on = false;
+  if (musicBus && AC) {
+    const b = musicBus, t = AC.currentTime;
+    try { b.gain.cancelScheduledValues(t); b.gain.setValueAtTime(b.gain.value, t); b.gain.linearRampToValueAtTime(0, t + 0.06); } catch (e) {}
+    setTimeout(() => { try { b.disconnect(); } catch (e) {} }, 250);
+  }
+  musicBus = null;
+}
+function musicTick() {
+  if (!music.on || !AC || !musicBus) return;
+  const now = AC.currentTime;
+  if (music.next < now - 0.2) { const skip = Math.ceil((now - music.next) / SIX); music.step += skip; music.next += skip * SIX; }
+  while (music.next < now + 0.12) { playStep(music.step, music.next); music.step++; music.next += SIX; }
+}
+// In a normal run the beat grid is pinned to the cat's clock (one leap = one beat). If they drift apart
+// (the audio clock started late on a touch unlock, a resume, a long hitch), re-pin the grid and silence
+// whatever was already queued on the old one, so no note plays twice or off the beat.
+function reanchorMusic() {
+  if (!AC || AC.state !== 'running' || !music.on || !musicBus || G.mode !== 'play' || G.practice) return;
+  const now = AC.currentTime, t0 = now - G.p.t + MUSIC_LEAD;
+  if (Math.abs(t0 - music.t0) < 0.04) return;
+  const old = musicBus;
+  try { old.gain.cancelScheduledValues(now); old.gain.setValueAtTime(0, now); } catch (e) {}
+  setTimeout(() => { try { old.disconnect(); } catch (e) {} }, 300);
+  musicBus = AC.createGain(); musicBus.gain.value = musicGain(); musicBus.connect(master);
+  music.t0 = t0; music.step = Math.max(0, Math.ceil((now - t0) / SIX)); music.next = t0 + music.step * SIX;
+}
+function beats() { return music.on && AC ? Math.max(0, AC.currentTime - music.t0) * BPM / 60 : G.time * BPM / 60; }
+
+function sfxDeath() {
+  if (!AC) return;
+  const t = AC.currentTime;
+  const f = noise(t, 0.35, 0.45, 'lowpass', 2600, master);
+  f.frequency.exponentialRampToValueAtTime(180, t + 0.3);
+  meow(t + 0.03, 0.9 + Math.random() * 0.25);
+}
+function sfxWin() {
+  if (!AC) return;
+  const t = AC.currentTime;
+  [69, 72, 76, 81, 84, 88].forEach((n, i) => voice(t + i * 0.09, mtof(n), 0.22, 'square', 0.08, 3500, master));
+  meow(t + 0.6, 1.25);
+}
+function sfxBlip(n) { if (AC) voice(AC.currentTime, mtof(n || 84), 0.06, 'square', 0.05, 3000, master); }
+function setMuted(m) {
+  muted = m; store.set('muted', m);
+  if (master) master.gain.setTargetAtTime(m ? 0 : 0.5, AC.currentTime, 0.02);
+}
+function setMusicVol(v) {
+  const prev = musicVol;
+  musicVol = clamp(Math.round(v * 100) / 100, 0, 1);
+  store.set('musicVol', musicVol);
+  if (musicBus && AC) musicBus.gain.setTargetAtTime(musicGain(), AC.currentTime, 0.02);
+  if (muted && v > prev) setMuted(false);   // turning the music up is a clear "I want sound"
+  G.volT = 1.2;
+}
+
+// ===== Game state =====
+const LV = buildLevel(LEVEL);
+const DEMO = buildLevel(makeDemo());
+
+function makeDemo() {   // the title screen's chimney, climbed by a simple autopilot
+  const S = '##......##', hues = [14, 205, 285, 48, 352, 232], d = [[10, S]];
+  for (let i = 0; i < 90; i++) {
+    if (i % 8 === 0) d.push({ hue: hues[(i / 8) % hues.length] });
+    d.push(i % 2 ? '##.....<##' : '##>.....##', [5 + (i * 3) % 4, S]);
+  }
+  d.push([30, S]);
+  return d;
+}
+function sectionIndex(lv, d) {
+  let i = 0;
+  while (i + 1 < lv.sections.length && lv.sections[i + 1].d <= d) i++;
+  return i;
+}
+function hueAt(lv, d) {
+  const s = lv.sections;
+  if (!s.length) return 14;
+  const i = sectionIndex(lv, d);
+  if (i === 0) return s[0].hue;
+  return hueLerp(s[i - 1].hue, s[i].hue, ease(clamp((d - s[i].d) / 10, 0, 1)));
+}
+
+const G = {
+  mode: 'title', pauseFrom: 'play', practice: false, session: 0,
+  attempts: storedInt('attempts'), best: Math.min(100, storedInt('best')), wins: storedInt('wins'),
+  skin: storedInt('skin') % SKINS.length,
+  p: null, demo: null, prev: { x: 0, d: 0, t: 0 }, acc: 0, deadT: 0, winT: 0, shake: 0, time: 0, frameDt: 0,
+  flags: [], parts: [], confetti: [], motes: [], ring: null,
+  cam: { d: 0, gx: 0, frac: 0.14 }, buttons: [], drag: null, mx: -1, my: -1,
+  secIdx: 0, secT: 0, secName: '', bestT: 0, volT: 0, paintBudget: 0,
+};
+// A press leaps once (buffered briefly so an early tap still counts). Holding only starts auto-bouncing
+// after HOLD_DELAY, like key repeat, so a normal tap in a narrow shaft never bounces the cat straight back.
+const HOLD_DELAY = 0.2;
+const input = { keys: new Set(), ptrs: new Set(), buffer: 0, heldT: 0, get held() { return this.keys.size > 0 || this.ptrs.size > 0; } };
+
+// Feet on the wall, facing up the chimney.
+const POSE = { '-1': { ang: Math.PI / 2, flip: true }, '1': { ang: -Math.PI / 2, flip: false } };
+function decorate(p) { const s = POSE[p.dir]; p.ang = s.ang; p.flipX = s.flip; p.sq = 0; p.fly = null; p.fxT = 0; return p; }
+function remember(p) { G.prev.x = p.x; G.prev.d = p.d; G.prev.t = p.t; }
+function resetDemo() { G.demo = decorate(newCat(DEMO)); remember(G.demo); }
+
+function startRun(practice) {
+  G.practice = practice; G.flags = []; G.confetti = []; G.session = 0; G.cam.ox = 0;
+  input.keys.clear(); input.ptrs.clear(); input.buffer = 0;
+  sfxBlip(88);
+  musicStop();
+  spawn();
+}
+function spawn() {
+  const flag = G.practice && G.flags.length ? G.flags[G.flags.length - 1] : null;
+  G.p = decorate(Object.assign(newCat(LV), flag ? flag.state : {}));
+  remember(G.p);
+  G.mode = 'play'; G.acc = 0; G.parts = []; G.ring = null;
+  G.secIdx = sectionIndex(LV, G.p.d); G.secT = 0;
+  if (!flag) {
+    G.session++;
+    if (!G.practice) { G.attempts = Math.max(G.attempts, storedInt('attempts')) + 1; store.set('attempts', G.attempts); }
+  }
+  if (!G.practice || !music.on) musicStart();
+}
+function die() {
+  const p = G.p, s = SKINS[G.skin];
+  G.mode = 'dead'; G.deadT = 0; G.shake = 0.4;
+  burst(p.x + 0.5, p.d + 0.5, 36, [s.body, s.dark, s.belly, '#ffcf4a', '#c8302a'], 4, 12, 0.55, 1.0, 0.08, 0.2, -14);
+  G.ring = { x: p.x + 0.5, d: p.d + 0.5, t: 0 };
+  sfxDeath();
+  if (!G.practice) {
+    musicStop();
+    const pct = Math.min(99, Math.floor(p.d / (LV.end - 1) * 100));
+    G.best = Math.max(G.best, Math.min(100, storedInt('best')));   // another tab may have done better
+    if (pct > G.best) { G.best = pct; store.set('best', pct); G.bestT = 1.6; }
+  }
+}
+function win() {
+  const p = G.p, side = p.dir;   // exit over the wall the cat is holding on to, or leaping toward
+  G.mode = 'win'; G.winT = 0;
+  const last = LV.rows[LV.end - 1], wx = side < 0 ? last.indexOf('.') : last.lastIndexOf('.');
+  const tA = Math.max(0.12, Math.abs(wx - p.x) / CFG.DASH), tB = tA + 0.3, tC = tB + 0.5;   // phase end times
+  const s = POSE[side];
+  let a1 = s.ang;
+  while ((a1 - p.ang) * side < 0) a1 += side * TAU;
+  const landX = side < 0 ? -2.2 : CFG.GW + 1.2;
+  G.winCat = { x0: p.x, d0: p.d, a0: p.ang, a1, f0: p.flipX, side, wx, tA, tB, tC,
+    topD: LV.end + STACK + 0.4, landX, landD: roofAt(LV, landX + 0.5), landed: false };
+  musicStop();
+  if (!G.practice) {
+    G.best = 100; store.set('best', 100);
+    G.wins = Math.max(G.wins, storedInt('wins')) + 1; store.set('wins', G.wins);
+  }
+}
+// The finale, driven by G.winT: scramble out of the stack, flip over the rim, land on the roof,
+// then turn to look at the moon.
+const winUiAt = () => G.winCat.tC + 0.15, winButtonsAt = () => G.winCat.tC + 0.95;
+function updateWinCat() {
+  const w = G.winCat, p = G.p, t = G.winT, s = POSE[w.side], rest = w.side < 0 ? -SLOPE_A : SLOPE_A;
+  if (t < w.tA) {            // finish crossing to the exit wall (a no-op if already clinging to it)
+    const k = t / w.tA;
+    p.x = lerp(w.x0, w.wx, k); p.d = lerp(w.d0, w.d0 + 0.9, k); p.sq = 0;
+    if (w.x0 === w.wx) { p.ang = s.ang; p.flipX = s.flip; p.fly = null; }
+    else { p.ang = lerp(w.a0, w.a1, ease(k)); p.flipX = k < 0.5 ? w.f0 : s.flip; p.fly = true; }
+  } else if (t < w.tB) {     // scramble up and out of the chimney stack
+    p.x = w.wx; p.d = lerp(w.d0 + 0.9, w.topD, (t - w.tA) / (w.tB - w.tA)); p.ang = s.ang; p.flipX = s.flip; p.fly = null; p.sq = 0;
+  } else if (t < w.tC) {     // flip over the rim
+    const k = (t - w.tB) / (w.tC - w.tB);
+    p.x = lerp(w.wx, w.landX, k); p.d = lerp(w.topD, w.landD, k) + 6.4 * k * (1 - k);
+    p.ang = lerp(s.ang, rest + w.side * TAU, ease(k)); p.flipX = w.side < 0; p.fly = true; p.sq = 0;
+  } else {                   // land on the roof, then turn to look at the moon
+    if (!w.landed) { w.landed = true; p.x = w.landX; p.d = w.landD; landOnRoof(); }
+    p.x = w.landX; p.d = w.landD; p.ang = rest; p.fly = null;
+    p.flipX = t > w.tC + 0.75 ? sx(p.x + 0.5) > W * MOON_X : w.side < 0;
+    p.sq = -0.3 * Math.exp(-(t - w.tC) * 10) + 0.02 * Math.sin(t * 3);
+  }
+  remember(p);
+}
+function landOnRoof() {
+  const p = G.p;
+  G.shake = 0.12;
+  burst(p.x + 0.5, p.d, 18, ['#8a6a55', '#d2795a', '#9c3f2b'], 2, 6, 0.4, 0.8, 0.05, 0.12, -12);
+  sfxWin();
+  for (let i = 0; i < 140; i++) {
+    G.confetti.push({
+      x: Math.random() * W, y: -Math.random() * H * 0.8 - 20, vx: (Math.random() - 0.5) * 80, vy: 60 + Math.random() * 160,
+      r: Math.random() * TAU, vr: (Math.random() - 0.5) * 8, slice: Math.random() < 0.45,
+      c: ['#ffd23f', '#ff6b6b', '#4ade80', '#60a5fa', '#f472b6', '#fff'][i % 6], s: (8 + Math.random() * 10) * UI,
+    });
+  }
+}
+function pause() {
+  if (G.mode !== 'play' && G.mode !== 'dead') return;
+  G.pauseFrom = G.mode; G.mode = 'pause';
+  input.keys.clear(); input.ptrs.clear(); input.buffer = 0;
+  if (AC) AC.suspend();
+}
+function resume() {
+  if (G.mode !== 'pause') return;
+  G.mode = G.pauseFrom; G.acc = 0;
+  input.keys.clear(); input.ptrs.clear(); input.buffer = 0;
+  if (AC) AC.resume();
+}
+function toMenu() {
+  musicStop();
+  if (AC && AC.state === 'suspended') AC.resume();
+  G.mode = 'title'; G.flags = []; G.confetti = []; G.parts = []; G.cam.ox = 0;
+  input.keys.clear(); input.ptrs.clear(); input.buffer = 0;
+  resetDemo();
+}
+function placeFlag() {
+  const p = G.p;
+  if (!G.practice || G.mode !== 'play' || !p.cling) return;
+  G.flags.push({ x: p.x, d: p.d, dir: p.dir, state: { x: p.x, d: p.d, t: p.t, dir: p.dir, cling: true, coyote: CFG.COYOTE } });
+  sfxBlip(91);
+}
+function removeFlag() { if (G.practice && G.flags.length) { G.flags.pop(); sfxBlip(76); } }
+function cycleSkin(d) { G.skin = (G.skin + d + SKINS.length) % SKINS.length; store.set('skin', G.skin); buildCat(); sfxBlip(80 + G.skin * 2); }
+
+// ===== Effects =====
+function burst(x, d, n, colors, s0, s1, l0, l1, z0, z1, grav) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * TAU, sp = lerp(s0, s1, Math.random()), life = lerp(l0, l1, Math.random());
+    G.parts.push({ x, d, vx: Math.cos(a) * sp, vd: Math.sin(a) * sp + 3, life, max: life, size: lerp(z0, z1, Math.random()),
+      c: colors[i % colors.length], r: Math.random() * TAU, vr: (Math.random() - 0.5) * 14, g: grav });
+  }
+}
+function gapAhead(lv, p) {   // empty tiles between the cat and the next wall in its direction
+  const r = Math.floor(p.d + 0.5);
+  let c = Math.round(p.x) + p.dir, n = 0;
+  while (n < CFG.GW && !solidAt(lv, c, r)) { n++; c += p.dir; }
+  return n;
+}
+function animStep(p, lv) {   // visual-only state, advanced once per sim step
+  const dt = CFG.DT;
+  if (p.flipped) {           // leap: tumble across and arrive feet-first on the other wall
+    const end = POSE[p.dir], spin = p.dir;
+    const dur = Math.max(0.05, gapAhead(lv, p) / CFG.DASH);
+    let target = end.ang;
+    while ((target - p.ang) * spin < Math.PI * 0.9) target += spin * TAU;
+    if (dur > 0.3) target += spin * TAU;
+    p.fly = { a0: p.ang, a1: target, t: 0, dur, flip: end.flip };
+    p.sq = 0.15;
+  }
+  if (p.fly) {
+    p.fly.t += dt;
+    const k = Math.min(1, p.fly.t / p.fly.dur);
+    p.ang = lerp(p.fly.a0, p.fly.a1, ease(k));
+    if (k >= 0.5) p.flipX = p.fly.flip;
+  }
+  if (p.landed) {
+    const end = POSE[p.dir];
+    p.ang = end.ang; p.flipX = end.flip; p.fly = null; p.sq = -0.28;
+    const wx = p.dir > 0 ? p.x + 1 : p.x;
+    for (let i = 0; i < 6; i++) G.parts.push({ x: wx, d: p.d + 0.2 + Math.random() * 0.6, vx: -p.dir * (1 + Math.random() * 2.5), vd: (Math.random() - 0.5) * 3,
+      life: 0.35, max: 0.35, size: 0.06 + Math.random() * 0.08, c: 'rgba(120,95,75,.45)', r: 0, vr: 0, g: 0, round: true });
+  }
+  p.sq *= Math.exp(-dt * 12);
+  if (p.cling && (p.fxT += dt) > 0.045) {   // claws scraping the bricks
+    p.fxT = 0;
+    const wx = p.dir > 0 ? p.x + 1 : p.x;
+    G.parts.push({ x: wx - p.dir * 0.05, d: p.d + 0.15 + Math.random() * 0.7, vx: -p.dir * Math.random() * 0.8, vd: CFG.CLIMB * 0.35,
+      life: 0.22, max: 0.22, size: 0.05 + Math.random() * 0.05, c: Math.random() < 0.5 ? 'rgba(110,80,60,.55)' : 'rgba(160,130,100,.5)', r: 0, vr: 0, g: 0, round: true });
+  }
+}
+function updateFx(dt) {
+  G.shake = Math.max(0, G.shake - dt);
+  G.secT = Math.max(0, G.secT - dt);
+  G.bestT = Math.max(0, G.bestT - dt);
+  G.volT = Math.max(0, G.volT - dt);
+  if (G.ring) { G.ring.t += dt; if (G.ring.t > 0.5) G.ring = null; }
+  for (let i = G.parts.length - 1; i >= 0; i--) {
+    const q = G.parts[i];
+    q.life -= dt;
+    if (q.life <= 0) { G.parts.splice(i, 1); continue; }
+    q.vd += q.g * dt; q.x += q.vx * dt; q.d += q.vd * dt; q.r += q.vr * dt;
+  }
+  // speed streaks rushing past while the cat climbs
+  const climbing = G.mode === 'play' || G.mode === 'title';
+  while (G.motes.length < 26) G.motes.push({ u: Math.random(), y: Math.random() * H, len: 0.4 + Math.random() * 1.2, k: 0.5 + Math.random() * 0.8 });
+  if (climbing) for (const m of G.motes) { m.y += CFG.CLIMB * TS * m.k * dt; if (m.y > H) { m.y = -m.len * TS - Math.random() * TS * 2; m.u = Math.random(); } }
+  for (let i = G.confetti.length - 1; i >= 0; i--) {
+    const c = G.confetti[i];
+    c.vy += 40 * dt; c.x += (c.vx + Math.sin(G.time * 3 + i) * 30) * dt; c.y += c.vy * dt; c.r += c.vr * dt;
+    if (c.y > H + 40) G.confetti.splice(i, 1);
+  }
+}
+
+// ===== Simulation driving =====
+function simStep() {
+  const p = G.p;
+  remember(p);
+  input.heldT = input.held ? input.heldT + CFG.DT : 0;
+  stepCat(p, LV, input.buffer > 0 || input.heldT >= HOLD_DELAY, 0);
+  if (p.flipped) input.buffer = 0;
+  else if (input.buffer > 0) input.buffer -= CFG.DT;
+  if (p.dead) { die(); return; }
+  animStep(p, LV);
+  const si = sectionIndex(LV, p.d);
+  if (si !== G.secIdx) { G.secIdx = si; G.secName = LV.sections[si].name; G.secT = 2.2; }
+  if (p.won) win();
+}
+function demoStep() {   // title-screen autopilot: leap when a slice is coming up on our wall
+  const p = G.demo;
+  let tap = false;
+  if (p.cling) {
+    const col = Math.round(p.x);
+    for (let r = Math.floor(p.d + 1.2); r <= Math.floor(p.d + 2.4); r++) {
+      const ch = DEMO.rows[r] && DEMO.rows[r][col];
+      if (ch === '>' || ch === '<') tap = true;
+    }
+  }
+  remember(p);
+  stepCat(p, DEMO, tap, 0);
+  animStep(p, DEMO);
+  if (p.dead || p.d > DEMO.end - 20) resetDemo();
+}
+
+// ===== Rendering =====
+const R0 = rng(7);
+const STARS = Array.from({ length: 70 }, () => ({ x: R0(), y: R0(), r: 0.8 + R0() * 1.6, p: R0() * TAU }));
+const inkA = a => `rgba(59,42,32,${a})`;
+
+function text(s, x, y, size, color, align, weight, outline) {
+  ctx.font = `${weight || 900} ${Math.max(8, Math.round(size))}px ${FONT}`;
+  ctx.textAlign = align || 'center'; ctx.textBaseline = 'middle';
+  if (outline !== false) { ctx.lineJoin = 'round'; ctx.lineWidth = Math.max(3, size * 0.22); ctx.strokeStyle = 'rgba(247,240,226,.85)'; ctx.strokeText(s, x, y); }
+  ctx.fillStyle = color || INK; ctx.fillText(s, x, y);
+}
+function fitText(s, x, y, size, maxW, color, align, weight) {   // shrink the font until it fits
+  ctx.font = `${weight || 900} ${Math.max(8, Math.round(size))}px ${FONT}`;
+  const w = ctx.measureText(s).width;
+  text(s, x, y, w > maxW ? size * maxW / w : size, color, align, weight);
+}
+// Big headings are painted like the sprites. Painting text is slow-ish, so results are cached and at
+// most one new one is painted per frame (window resizes); until then plain text stands in.
+const painted = new Map();
+function drawPainted(str, x, y, size, fill, edge, seed) {
+  size = Math.max(10, Math.round(size / 2) * 2);
+  const key = str + '|' + size + '|' + fill;
+  let c = painted.get(key);
+  if (!c && G.paintBudget > 0) {
+    G.paintBudget--;
+    const px = size * DPR, font = `900 ${px}px ${FONT}`, m = makeCanvas(1, 1).getContext('2d');
+    m.font = font;
+    c = makeCanvas(Math.ceil(m.measureText(str).width + px * 0.7), Math.ceil(px * 1.6));
+    const g = c.getContext('2d');
+    g.font = font; g.textAlign = 'center'; g.textBaseline = 'middle'; g.lineJoin = 'round';
+    g.lineWidth = px * 0.12; g.strokeStyle = edge; g.strokeText(str, c.width / 2, c.height / 2);
+    g.fillStyle = fill; g.fillText(str, c.width / 2, c.height / 2);
+    watercolorize(c, { seed: seed || 3, wobble: px * 0.03, cell: px * 0.22, blur: Math.max(1, px * 0.035), edge: 0.6, gran: 0.18, wash: 0.22 });
+    painted.set(key, c);
+  }
+  if (c) ctx.drawImage(c, x - c.width / DPR / 2, y - c.height / DPR / 2, c.width / DPR, c.height / DPR);
+  else text(str, x, y, size, fill);
+}
+
+// A hand-painted rounded blob: a wobbly outline, two translucent layers and a darker pooled rim.
+function blobPath(x, y, w, h, seed) {
+  const n = 22, cx = x + w / 2, cy = y + h / 2, j = Math.min(w, h) * 0.07, pts = [];
+  for (let i = 0; i < n; i++) {
+    const t = i / n * TAU, c = Math.cos(t), s = Math.sin(t), k = (hash2(i, 0, seed) - 0.5) * 2 * j;
+    pts.push([cx + (w / 2) * Math.sign(c) * Math.pow(Math.abs(c), 0.4) + c * k, cy + (h / 2) * Math.sign(s) * Math.pow(Math.abs(s), 0.4) + s * k]);
+  }
+  ctx.beginPath();
+  for (let i = 0; i <= n; i++) {   // smooth curve through the midpoints
+    const a = pts[i % n], b = pts[(i + 1) % n], mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2;
+    if (i === 0) ctx.moveTo(mx, my); else ctx.quadraticCurveTo(a[0], a[1], mx, my);
+  }
+  ctx.closePath();
+}
+function washBlob(x, y, w, h, fill, rim, seed) {
+  if (!(w > 0 && h > 0)) return;
+  ctx.fillStyle = fill;
+  blobPath(x, y, w, h, seed); ctx.globalAlpha = 0.85; ctx.fill();
+  blobPath(x + w * 0.03, y + h * 0.06, w * 0.94, h * 0.86, seed + 1); ctx.globalAlpha = 0.3; ctx.fill();
+  blobPath(x, y, w, h, seed); ctx.globalAlpha = 0.7; ctx.lineWidth = Math.max(1.5, Math.min(w, h) * 0.06); ctx.strokeStyle = rim; ctx.stroke();
+  ctx.globalAlpha = 1;
+}
+const seedOf = s => { let h = 7; for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619); return h >>> 0; };
+const hit = (b, x, y) => x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h;
+
+function button(label, cx, cy, w, h, primary, onTap) {
+  const b = { x: cx - w / 2, y: cy - h / 2, w, h, onTap };
+  const hov = hit(b, G.mx, G.my), lift = hov ? 2 * UI : 0, seed = seedOf(label);
+  washBlob(b.x + 3 * UI, b.y + 5 * UI, w, h, 'rgba(90,60,40,.18)', 'rgba(0,0,0,0)', seed + 5);   // soft shadow
+  if (primary) washBlob(b.x, b.y - lift, w, h, hov ? '#f7c768' : '#f0b13f', '#9a5a1c', seed);
+  else washBlob(b.x, b.y - lift, w, h, hov ? '#fffaf0' : '#f7efe0', '#6b5240', seed);
+  text(label, cx, cy - lift + 1, h * 0.42, primary ? '#3b2410' : INK, 'center', 900, false);
+  G.buttons.push(b);
+}
+// lim (optional): { r } caps the hit radius, { x0, x1 } clip it where it meets a neighbouring control.
+function iconButton(kind, cx, cy, r, onTap, lim) {
+  lim = lim || {};
+  const hr = Math.max(r, lim.r == null ? 22 : lim.r);   // generous hit box for fingers, whatever the drawn size
+  const x0 = Math.max(cx - hr, lim.x0 == null ? -Infinity : lim.x0), x1 = Math.min(cx + hr, lim.x1 == null ? Infinity : lim.x1);
+  const b = { x: x0, y: cy - hr, w: x1 - x0, h: hr * 2, onTap };
+  washBlob(cx - r, cy - r, r * 2, r * 2, hit(b, G.mx, G.my) ? '#fffaf0' : '#f3e9d6', '#6b5240', seedOf(kind));
+  const u = r / 10;
+  ctx.fillStyle = ctx.strokeStyle = INK; ctx.lineCap = 'round';
+  if (kind === 'pause') {
+    ctx.fillRect(cx - 3.6 * u, cy - 4.5 * u, 2.6 * u, 9 * u); ctx.fillRect(cx + 1 * u, cy - 4.5 * u, 2.6 * u, 9 * u);
+  } else if (kind === 'sound') {
+    ctx.beginPath(); ctx.moveTo(cx - 5.5 * u, cy - 2 * u); ctx.lineTo(cx - 3 * u, cy - 2 * u); ctx.lineTo(cx + 0.5 * u, cy - 5.2 * u);
+    ctx.lineTo(cx + 0.5 * u, cy + 5.2 * u); ctx.lineTo(cx - 3 * u, cy + 2 * u); ctx.lineTo(cx - 5.5 * u, cy + 2 * u); ctx.closePath(); ctx.fill();
+    ctx.lineWidth = 1.4 * u; ctx.beginPath();
+    if (muted) { ctx.moveTo(cx + 2.8 * u, cy - 2.8 * u); ctx.lineTo(cx + 7.4 * u, cy + 2.8 * u); ctx.moveTo(cx + 7.4 * u, cy - 2.8 * u); ctx.lineTo(cx + 2.8 * u, cy + 2.8 * u); }
+    else { ctx.arc(cx + 0.5 * u, cy, 3.6 * u, -0.9, 0.9); ctx.moveTo(cx + 0.5 * u + 6.6 * u * Math.cos(-0.9), cy + 6.6 * u * Math.sin(-0.9)); ctx.arc(cx + 0.5 * u, cy, 6.6 * u, -0.9, 0.9); }
+    ctx.stroke();
+  } else {   // 'left' / 'right' arrows
+    const d = kind === 'left' ? -1 : 1;
+    ctx.beginPath(); ctx.moveTo(cx + 3.5 * u * d, cy); ctx.lineTo(cx - 2.5 * u * d, cy - 5 * u); ctx.lineTo(cx - 2.5 * u * d, cy + 5 * u); ctx.closePath(); ctx.fill();
+  }
+  G.buttons.push(b);
+}
+// A draggable 0..1 slider. The whole row swallows taps so a near miss never starts a run.
+function slider(id, label, cx, cy, w, u, value, onChange, hitTop) {
+  ctx.font = `900 ${Math.max(8, Math.round(14 * u))}px ${FONT}`;   // leave room for the text even at its minimum size
+  const lw = Math.max(64 * u, ctx.measureText(label).width + 12), pw = Math.max(46 * u, ctx.measureText('100%').width + 10);
+  const x0 = cx - w / 2, th = 9 * u, kr = 10 * u;
+  const tx = x0 + lw, tw = Math.max(20, w - lw - pw);
+  text(label, x0, cy, 14 * u, INK, 'left', 900);
+  washBlob(tx, cy - th / 2, tw, th, '#efe4cf', '#8a6f58', 31);
+  if (value > 0) washBlob(tx, cy - th / 2, Math.max(th, tw * value), th, '#f0b13f', '#9a5a1c', 32);
+  const kx = tx + tw * value, hov = G.drag === id || Math.hypot(G.mx - kx, G.my - cy) < kr * 1.8, k = kr * (hov ? 1.15 : 1);
+  washBlob(kx - k, cy - k, k * 2, k * 2, '#fffaf0', INK, 33);
+  text(Math.round(value * 100) + '%', x0 + w, cy, 14 * u, INK, 'right', 900);
+  const hh = Math.max(kr * 2.4, 36), top = Math.max(cy - hh / 2, hitTop == null ? -Infinity : hitTop);
+  G.buttons.push({ id, x: x0, y: top, w, h: cy + hh / 2 - top, tx0: tx - kr, tx1: tx + tw + kr,
+    drag: px => onChange(clamp((px - tx) / tw, 0, 1)) });
+}
+
+const sx = c => G.cam.gx + c * TS;
+const wy = v => H - (v - G.cam.d) * TS;   // screen y of a climb position (higher climb = higher on screen)
+const rowTop = r => wy(r + 1);
+function multiply(pat, ox, oy, x, y, w, h, alpha) {   // lay a texture over an area like a glaze
+  if (!pat) return;
+  ctx.save(); ctx.globalCompositeOperation = 'multiply'; ctx.globalAlpha = alpha == null ? 1 : alpha;
+  ctx.translate(ox, oy); ctx.fillStyle = pat; ctx.fillRect(x - ox, y - oy, w, h);
+  ctx.restore();
+}
+const wallColour = (hue, pulse) => `hsl(${hue},46%,${70 + pulse * 3}%)`;
+
+// The top of the climb: the chimney stack pokes STACK rows out of a pitched roof under the night sky.
+const STACK = 1.3, SLOPE = 0.35, SLOPE_A = Math.atan(SLOPE), MOON_X = 0.82;
+function roofAt(lv, x) { return x < 0 ? lv.end + SLOPE * x : x > CFG.GW ? lv.end - SLOPE * (x - CFG.GW) : lv.end; }
+
+function drawRoofScene(lv, hue, pulse) {
+  const yEnd = wy(lv.end), yTop = wy(lv.end + STACK);
+  if (yTop - TS > H) return;
+  const xL = sx(0), xR = sx(CFG.GW), roofY = X => wy(roofAt(lv, (X - G.cam.gx) / TS));
+  const yLeft = roofY(-2), yRight = roofY(W + 2), low = Math.max(yLeft, yRight, yEnd);
+
+  // night sky: an ultramarine wash that pales toward the roof, with stars left as bare paper
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(-2, -2); ctx.lineTo(W + 2, -2); ctx.lineTo(W + 2, yRight); ctx.lineTo(xR, yEnd); ctx.lineTo(xR, yTop);
+  ctx.lineTo(xL, yTop); ctx.lineTo(xL, yEnd); ctx.lineTo(-2, yLeft); ctx.closePath();
+  const g = ctx.createLinearGradient(0, low - H, 0, low);
+  g.addColorStop(0, `hsl(228,42%,${34 + pulse * 3}%)`); g.addColorStop(0.7, 'hsl(232,38%,56%)'); g.addColorStop(1, 'hsl(28,55%,78%)');
+  ctx.fillStyle = PAPER; ctx.fill();
+  ctx.fillStyle = g; ctx.globalAlpha = 0.9; ctx.fill(); ctx.globalAlpha = 1;
+  ctx.clip();
+  multiply(PAT.wash, 0, -G.cam.d * TS * 0.1, 0, 0, W, H, 1);
+  ctx.fillStyle = 'rgba(250,244,230,.85)';
+  for (const s of STARS) {
+    const y = low - TS - s.y * H;
+    if (y > low) continue;
+    ctx.globalAlpha = 0.55 + 0.35 * Math.sin(G.time * 2 + s.p);
+    ctx.beginPath(); ctx.arc(s.x * W, y, s.r, 0, TAU); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  const r = Math.min(W, H) * 0.08 * (1 + pulse * 0.04), mx = W * MOON_X, my = Math.max(r * 1.6 + 8, yTop - TS * 2.6 - r);
+  const gl = ctx.createRadialGradient(mx, my, r * 0.7, mx, my, r * 2.6);
+  gl.addColorStop(0, 'rgba(255,226,150,.55)'); gl.addColorStop(1, 'rgba(255,226,150,0)');
+  ctx.fillStyle = gl; ctx.fillRect(mx - r * 3, my - r * 3, r * 6, r * 6);
+  const k = 2 * r * (1 + 2 * PAD);   // the moon is, naturally, a pizza
+  ctx.drawImage(SPR.moon, mx - k / 2, my - k / 2, k, k);
+  ctx.restore();
+
+  // terracotta roof tiles along both slopes
+  const band = TS * 0.8;
+  for (const [x0, y0, x1, y1] of [[-2, yLeft, xL, yEnd], [xR, yEnd, W + 2, yRight]]) {
+    if (x1 <= x0) continue;
+    ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.lineTo(x1, y1 + band); ctx.lineTo(x0, y0 + band); ctx.closePath();
+    ctx.fillStyle = '#d2795a'; ctx.fill();
+    ctx.save(); ctx.clip(); multiply(PAT.wash, 0, 0, Math.min(x0, x1), Math.min(y0, y1), Math.abs(x1 - x0), Math.abs(y1 - y0) + band, 1); ctx.restore();
+    ctx.strokeStyle = 'rgba(110,40,20,.45)'; ctx.lineWidth = Math.max(1, TS * 0.04); ctx.beginPath();
+    for (const f of [0.36, 0.7]) { ctx.moveTo(x0, y0 + band * f); ctx.lineTo(x1, y1 + band * f); }
+    const n = Math.max(1, Math.ceil((x1 - x0) / (TS * 0.5)));
+    for (let i = 0; i <= n; i++) {
+      const xx = x0 + (x1 - x0) * i / n, yy = y0 + (y1 - y0) * i / n, o = (i % 2) * 0.36;
+      ctx.moveTo(xx, yy + band * o); ctx.lineTo(xx, yy + band * (o + 0.34));
+    }
+    ctx.stroke();
+    ctx.strokeStyle = 'rgba(120,40,20,.7)'; ctx.lineWidth = Math.max(2, TS * 0.07);
+    ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+  }
+
+  // the chimney stack itself, sooty inside its mouth, with a capped rim
+  const last = lv.rows[lv.end - 1], a = last.indexOf('.'), b = last.lastIndexOf('.');
+  const soot = ctx.createLinearGradient(0, yTop, 0, yTop + TS * 3.5);
+  soot.addColorStop(0, 'rgba(58,44,52,.55)'); soot.addColorStop(1, 'rgba(58,44,52,0)');
+  ctx.fillStyle = soot; ctx.fillRect(sx(a), yTop, (b - a + 1) * TS, TS * 3.5);
+  const lw = Math.max(2, Math.round(TS * 0.07)), ov = TS * 0.15, oy = wy(0);
+  for (const [c0, c1] of [[0, a], [b + 1, CFG.GW]]) {
+    const x0 = sx(c0), w = (c1 - c0) * TS;
+    ctx.fillStyle = wallColour(hue, pulse); ctx.fillRect(x0, yTop, w, yEnd - yTop + 1);
+    multiply(PAT.bricks, G.cam.gx, oy, x0, yTop, w, yEnd - yTop + 1, 1);
+    washBlob(x0 - ov, yTop - TS * 0.26, w + ov * 2, TS * 0.3, `hsl(${hue},30%,62%)`, `hsla(${hue},45%,30%,.8)`, c0 + 50);
+  }
+  ctx.fillStyle = `hsla(${hue},55%,30%,.6)`;
+  ctx.fillRect(sx(a) - lw, yTop, lw, yEnd - yTop); ctx.fillRect(sx(b + 1), yTop, lw, yEnd - yTop);
+}
+
+function drawShaft(lv, hue, pulse, t) {
+  const cd = G.cam.d, gx = G.cam.gx, vis = H / TS;
+  // paper, a pale tinted wash for the back of the chimney, and faint bricks drifting slower for depth
+  ctx.fillStyle = PAPER; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = `hsla(${hue},40%,${66 + pulse * 4}%,.4)`; ctx.fillRect(0, 0, W, H);
+  multiply(PAT.bricks, gx, H + cd * TS * 0.55, 0, 0, W, H, 0.35);
+
+  const rLo = Math.floor(cd) - 1, rHi = Math.min(lv.end - 1, Math.ceil(cd + vis) + 1);
+  const c0 = Math.floor(-gx / TS) - 1, c1 = Math.ceil((W - gx) / TS);
+  const rects = [];
+  for (let r = rLo; r <= rHi; r++) {
+    const row = lv.rows[Math.max(0, r)], y = rowTop(r);
+    let run = null;
+    for (let c = c0; c <= c1 + 1; c++) {
+      const brick = c <= c1 && (c < 0 || c >= CFG.GW || row[c] === '#');
+      if (brick) { if (run === null) run = c; }
+      else if (run !== null) { rects.push([sx(run), y, (c - run) * TS, TS]); run = null; }
+    }
+  }
+  ctx.fillStyle = wallColour(hue, pulse);
+  for (const q of rects) ctx.fillRect(Math.floor(q[0]), Math.floor(q[1]), Math.ceil(q[2]) + 1, Math.ceil(q[3]) + 1);
+  const oy = wy(0);
+  for (const q of rects) multiply(PAT.bricks, gx, oy, Math.floor(q[0]), Math.floor(q[1]), Math.ceil(q[2]) + 1, Math.ceil(q[3]) + 1, 1);
+  // one uneven, cloudy glaze over walls and shaft alike, so nothing looks like flat wallpaper
+  multiply(PAT.wash, gx * 0.5, H + cd * TS * 0.8, 0, 0, W, H, 1);
+
+  // pigment pools where the walls meet the shaft; undersides (deadly to bump into) get a crimson stroke
+  const lw = Math.max(2, Math.round(TS * 0.06)), pool = `hsla(${hue},55%,28%,.6)`, soft = `hsla(${hue},55%,32%,.2)`;
+  for (let r = Math.max(rLo, 0); r <= rHi; r++) for (let c = 0; c < CFG.GW; c++) {
+    if (!lv.solid[r][c]) continue;
+    const x = sx(c), y = rowTop(r), j = (hash2(c, r, 3) - 0.5) * lw;
+    if (lv.rows[r][c] === 'B') ctx.drawImage(SPR.B, x - PAD * TS, y - PAD * TS, (1 + 2 * PAD) * TS, (1 + 2 * PAD) * TS);
+    if (!solidAt(lv, c - 1, r)) { ctx.fillStyle = soft; ctx.fillRect(x, y, lw * 3 + j, TS); ctx.fillStyle = pool; ctx.fillRect(x, y, lw, TS); }
+    if (!solidAt(lv, c + 1, r)) { ctx.fillStyle = soft; ctx.fillRect(x + TS - lw * 3 - j, y, lw * 3 + j, TS); ctx.fillStyle = pool; ctx.fillRect(x + TS - lw, y, lw, TS); }
+    if (r > 0 && !solidAt(lv, c, r - 1)) {
+      const hw = Math.max(3, Math.round(TS * 0.11));
+      ctx.fillStyle = 'rgba(192,57,43,.35)'; ctx.fillRect(x, y + TS - hw * 1.8 + j, TS, hw * 1.8 - j);
+      ctx.fillStyle = 'rgba(170,40,30,.85)'; ctx.fillRect(x, y + TS - hw, TS, hw);
+    }
+  }
+  drawRoofScene(lv, hue, pulse);
+
+  // the oven at the bottom, where the climb starts: a giant pizza and the fire's warm bloom
+  const y0 = wy(0);
+  if (y0 < H + TS) {
+    const row = lv.rows[0], a = row.indexOf('.'), b = row.lastIndexOf('.'), x0 = sx(a), x1 = sx(b + 1);
+    const glow = ctx.createLinearGradient(0, y0 - TS * 4, 0, y0);
+    glow.addColorStop(0, 'rgba(240,120,60,0)'); glow.addColorStop(1, 'rgba(240,120,60,.45)');
+    ctx.fillStyle = glow; ctx.fillRect(x0, y0 - TS * 4, x1 - x0, TS * 4);
+    ctx.fillStyle = '#f3c862'; ctx.fillRect(x0, y0, x1 - x0, H - y0 + TS);
+    washBlob(x0, y0 - TS * 0.14, x1 - x0, TS * 0.5, '#d9925a', '#8a4b22', 61);
+    for (let i = 0; i < 12; i++) {
+      const px = x0 + TS * 0.5 + ((i * 0.618) % 1) * (x1 - x0 - TS), py = y0 + TS * (0.95 + (i % 4) * 0.85), pr = TS * 0.27;
+      if (py < H + TS) washBlob(px - pr, py - pr, pr * 2, pr * 2, '#c84a3a', '#8e2a1e', 70 + i);
+    }
+    multiply(PAT.wash, 0, 0, x0, y0, x1 - x0, H - y0 + TS, 1);
+  }
+
+  // slices and pizzas
+  const s = (1 + 2 * PAD) * TS;
+  for (let r = Math.max(rLo, 0); r <= rHi; r++) {
+    const row = lv.rows[r];
+    for (let c = 0; c < CFG.GW; c++) {
+      const ch = row[c];
+      if (ch === '>' || ch === '<') ctx.drawImage(SPR[ch], sx(c) - PAD * TS, rowTop(r) - PAD * TS, s, s);
+    }
+    const pzs = lv.pizzas[r];
+    if (pzs) for (const pz of pzs) {
+      const y = wy(r + 0.5);
+      if (pz.move) {   // the oven rack it swings along
+        const a = row.indexOf('.'), b = row.lastIndexOf('.');
+        ctx.fillStyle = inkA(0.45); ctx.fillRect(sx(a), y - 1.5, (b - a + 1) * TS, 3);
+      }
+      ctx.save(); ctx.translate(sx(pizzaX(pz, t)), y); ctx.rotate(t * (pz.move ? 7 : 4) * (pz.c % 2 ? 1 : -1));
+      ctx.drawImage(SPR.pizza, -s / 2, -s / 2, s, s);
+      ctx.restore();
+    }
+  }
+}
+
+function drawMotes(lv) {   // faint brush streaks rushing past, only inside the chimney
+  if (G.mode === 'win') return;
+  const gx = G.cam.gx, top = Math.max(0, wy(lv.end + STACK));
+  ctx.strokeStyle = inkA(0.09); ctx.lineWidth = 2; ctx.lineCap = 'round'; ctx.beginPath();
+  for (const m of G.motes) {
+    const x = gx + (2 + m.u * (CFG.GW - 4)) * TS, y0 = Math.max(top, m.y), y1 = m.y + m.len * TS;
+    if (y1 > y0) { ctx.moveTo(x, y0); ctx.lineTo(x, y1); }
+  }
+  ctx.stroke();
+}
+
+function drawFlags() {
+  for (const f of G.flags) {
+    const y = wy(f.d + 0.5), x = sx(f.dir > 0 ? f.x + 1 : f.x);
+    if (y < -TS || y > H + TS) continue;
+    const k = -f.dir;   // the flag sticks out of the wall into the shaft
+    ctx.fillStyle = INK; ctx.fillRect(Math.min(x, x + k * TS * 0.9), y - 1.5, TS * 0.9, 3);
+    ctx.fillStyle = 'rgba(70,150,80,.85)';
+    ctx.beginPath(); ctx.moveTo(x + k * TS * 0.9, y); ctx.lineTo(x + k * TS * 0.6, y - TS * 0.45); ctx.lineTo(x + k * TS * 0.3, y); ctx.fill();
+  }
+}
+
+function drawPlayer(p, ix, id) {
+  const cat = SPR.cat, blink = G.time % 3.1 < 0.12;
+  const fr = p.fly ? cat.air : blink ? cat.blink : cat.run[((Math.floor(p.d * 3.2 / TAU * 8) % 8) + 8) % 8];
+  ctx.save();
+  ctx.translate(sx(ix + 0.5), wy(id + 0.5));
+  ctx.rotate(p.ang || 0);
+  if (p.flipX) ctx.scale(-1, 1);
+  const q = p.sq || 0;
+  ctx.translate(0, 0.5 * TS); ctx.scale(1 - q * 0.5, 1 + q); ctx.translate(0, -0.5 * TS);
+  ctx.drawImage(fr, -CAT_HALF * TS, -CAT_HALF * TS, CAT_HALF * 2 * TS, CAT_HALF * 2 * TS);
+  ctx.restore();
+}
+
+function drawParticles() {   // everything splashes like paint
+  for (const q of G.parts) {
+    const s = q.size * TS;
+    ctx.globalAlpha = clamp(q.life / q.max, 0, 1) * 0.85;
+    ctx.fillStyle = q.c;
+    ctx.beginPath(); ctx.arc(sx(q.x), wy(q.d), s / 2, 0, TAU); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  if (G.ring) {
+    const t = G.ring.t / 0.5;
+    ctx.strokeStyle = inkA(0.6 * (1 - t)); ctx.lineWidth = TS * 0.1 * (1 - t);
+    ctx.beginPath(); ctx.arc(sx(G.ring.x), wy(G.ring.d), TS * (0.3 + t * 2.2), 0, TAU); ctx.stroke();
+  }
+}
+
+function drawConfetti() {
+  for (const c of G.confetti) {
+    ctx.save(); ctx.translate(c.x, c.y); ctx.rotate(c.r);
+    if (c.slice) ctx.drawImage(SPR['^'], -c.s, -c.s, c.s * 2, c.s * 2);
+    else { ctx.globalAlpha = 0.8; ctx.fillStyle = c.c; ctx.beginPath(); ctx.ellipse(0, 0, c.s / 2, c.s / 4, 0, 0, TAU); ctx.fill(); }
+    ctx.restore();
+  }
+}
+
+function drawHUD() {
+  const pad = 14 * UI, bs = 19 * UI, cy = pad + bs;
+  const bw = Math.max(40, Math.min(440 * UI, W - 2 * (pad + 4 * bs + 24 * UI))), bh = 11 * UI, bx = (W - bw) / 2, by = cy - bh / 2;
+  const prog = clamp(G.p.d / (LV.end - 1), 0, 1);
+  washBlob(bx, by, bw, bh, '#f3e9d6', '#8a6f58', 21);
+  if (prog > 0) washBlob(bx, by, Math.max(bh, bw * prog), bh, '#f0b13f', '#9a5a1c', 22);
+  if (!G.practice && G.best > 0) { ctx.fillStyle = INK; ctx.fillRect(bx + bw * G.best / 100 - 1, by - 4 * UI, 2, bh + 8 * UI); }
+  text(G.practice ? 'PRACTICE' : 'ATTEMPT ' + G.session, bx, by + bh + 13 * UI, 13 * UI, INK, 'left');
+  text(Math.floor(prog * 100) + '%', bx + bw, by + bh + 13 * UI, 13 * UI, INK, 'right');
+
+  const sc = W - pad - bs, pc = W - pad - bs * 3 - 8 * UI, mid = (sc + pc) / 2;   // their hit boxes meet halfway
+  iconButton('sound', sc, cy, bs, () => setMuted(!muted), { x0: mid });
+  if (G.mode === 'play' || G.mode === 'dead') iconButton('pause', pc, cy, bs, pause, { x1: mid });
+
+  if (G.practice && (G.mode === 'play' || G.mode === 'dead')) {
+    button('+ FLAG', pad + 50 * UI, cy, 100 * UI, 34 * UI, false, placeFlag);
+    if (G.flags.length) button('UNDO', pad + 50 * UI, cy + 42 * UI, 100 * UI, 30 * UI, false, removeFlag);
+  }
+  if (G.secT > 0) {
+    ctx.globalAlpha = Math.min(1, G.secT * 1.5);
+    text(G.secName, W / 2, cy + 52 * UI, 24 * UI, `hsl(${hueAt(LV, G.p.d)},55%,32%)`);
+    ctx.globalAlpha = 1;
+  }
+  if (G.bestT > 0) {
+    ctx.globalAlpha = Math.min(1, G.bestT * 2);
+    text('NEW BEST! ' + G.best + '%', W / 2, H * 0.45, 34 * UI, '#b8321f');
+    ctx.globalAlpha = 1;
+  }
+}
+
+function drawVolumeToast() {   // feedback for the - / = keys when no slider is on screen
+  if (G.volT <= 0 || G.mode === 'title' || G.mode === 'pause') return;
+  ctx.globalAlpha = Math.min(1, G.volT * 3);
+  text('MUSIC ' + Math.round(musicVol * 100) + '%', W / 2, 14 * UI + 19 * UI + 80 * UI, 18 * UI, INK);
+  ctx.globalAlpha = 1;
+}
+
+function drawAttemptLabel() {
+  const y = wy(8.5);
+  if (y < -TS || y > H + TS) return;
+  text(G.practice ? 'PRACTICE' : 'ATTEMPT ' + G.session, W / 2, y, Math.min(TS * 0.8, W * 0.08), INK);
+}
+
+function drawTitle() {
+  const fade = ctx.createLinearGradient(0, 0, 0, H);
+  fade.addColorStop(0, 'rgba(246,239,224,.9)'); fade.addColorStop(0.65, 'rgba(246,239,224,.62)'); fade.addColorStop(1, 'rgba(246,239,224,.1)');
+  ctx.fillStyle = fade; ctx.fillRect(0, 0, W, H);
+  // everything scales down together when the embed is short
+  const u = UI * Math.min(1, H / (500 * UI));
+  const cx = W / 2, ts = Math.min(W * 0.115, 84 * u), yT = 14 * u + ts * 0.22;
+  const pulse = Math.pow(1 - (beats() % 1), 3);
+  ctx.save(); ctx.translate(cx, yT + ts * 0.45); ctx.scale(1 + pulse * 0.03, 1 + pulse * 0.03);
+  drawPainted('IMPAWSIBLE', 0, 0, ts, '#f0b13f', '#8a4b17', 5);
+  ctx.restore();
+  drawPainted('PIZZA', cx, yT + ts * 1.3, ts * 0.62, '#e0583a', '#7d2414', 6);
+  fitText('one cat. one chimney. far too much pizza.', cx, yT + ts * 1.95, Math.max(11, ts * 0.22), W * 0.92, INK, 'center', 700);
+
+  let y = yT + ts * 2.15 + 20 * u;
+  button('PLAY', cx, y + 27 * u, 200 * u, 54 * u, true, () => startRun(false)); y += 64 * u;
+  button('PRACTICE', cx, y + 20 * u, 170 * u, 40 * u, false, () => startRun(true)); y += 54 * u;
+  const ySkin = y + 15 * u; y += 38 * u;
+  G.buttons.push({ x: cx - 115 * u, y: ySkin - 18 * u, w: 230 * u, h: 36 * u, onTap: () => cycleSkin(G.mx < cx ? -1 : 1) });
+  iconButton('left', cx - 92 * u, ySkin, 15 * u, () => cycleSkin(-1), { r: 0 });   // the row's own hit box covers the slack
+  iconButton('right', cx + 92 * u, ySkin, 15 * u, () => cycleSkin(1), { r: 0 });
+  text(SKINS[G.skin].name, cx, ySkin, 19 * u, INK);
+  slider('music', 'MUSIC', cx, y + 15 * u, Math.min(290 * u, W * 0.9), u, musicVol, setMusicVol, (ySkin + y + 15 * u) / 2);
+
+  const info = (G.wins ? '★ beaten ' + G.wins + '× · ' : '') + 'best ' + G.best + '% · ' + G.attempts + ' attempts';
+  fitText(info, cx, H - 32 * u, 13 * u, W * 0.94, INK, 'center', 800);
+  fitText('SPACE / CLICK / TAP to leap to the other wall · hold to keep bouncing', cx, H - 13 * u, 11.5 * u, W * 0.94, inkA(0.8), 'center', 700);
+  iconButton('sound', W - 14 * UI - 19 * UI, 14 * UI + 19 * UI, 19 * UI, () => setMuted(!muted));
+}
+
+function drawPause() {
+  ctx.fillStyle = 'rgba(246,239,224,.8)'; ctx.fillRect(0, 0, W, H);
+  const u = UI * Math.min(1, H / (340 * UI)), cy = H / 2;
+  drawPainted('PAUSED', W / 2, cy - 105 * u, 50 * u, '#6f8fc4', '#2f4170', 7);
+  button('RESUME', W / 2, cy - 30 * u, 190 * u, 50 * u, true, resume);
+  button('MENU', W / 2, cy + 32 * u, 150 * u, 40 * u, false, toMenu);
+  slider('music', 'MUSIC', W / 2, cy + 92 * u, Math.min(290 * u, W * 0.9), u, musicVol, setMusicVol);
+}
+
+function drawWin() {   // the text appears once the cat has landed on the roof
+  const t = clamp((G.winT - winUiAt()) / 0.5, 0, 1);
+  if (t <= 0) return;
+  const s = 1 + Math.sin(t * Math.PI) * 0.25, u = UI * Math.min(1, H / (420 * UI)), ps = Math.min(W * 0.13, 72 * u);
+  ctx.fillStyle = `rgba(246,239,224,${0.3 * t})`; ctx.fillRect(0, 0, W, H);
+  let y = 22 * u + ps * 0.6;
+  ctx.save(); ctx.translate(W / 2, y); ctx.scale(s * t, s * t);
+  drawPainted('PURRFECT!', 0, 0, ps, '#f0b13f', '#8a4b17', 8);
+  ctx.restore();
+  y += ps * 0.6 + 22 * u;
+  const msg = G.practice ? 'Practice run complete. Now do it for real!'
+    : 'Out of the chimney and onto the roof in ' + G.session + ' attempt' + (G.session === 1 ? '' : 's') + '!';
+  ctx.globalAlpha = t; fitText(msg, W / 2, y, 18 * u, W * 0.92, INK, 'center', 800); ctx.globalAlpha = 1;
+  y += 30 * u;
+  if (G.winT > winButtonsAt()) {
+    button('PLAY AGAIN', W / 2, y + 26 * u, 210 * u, 52 * u, true, () => startRun(G.practice));
+    button('MENU', W / 2, y + 88 * u, 150 * u, 40 * u, false, toMenu);
+  }
+}
+
+function render() {
+  G.buttons = [];
+  G.paintBudget = 1;
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.globalCompositeOperation = 'source-over';
+  const title = G.mode === 'title';
+  const lv = title ? DEMO : LV, p = title ? G.demo : G.p;
+  const a = title || G.mode === 'play' ? G.acc / CFG.DT : 1;
+  const ix = lerp(G.prev.x, p.x, a), id = lerp(G.prev.d, p.d, a), it = lerp(G.prev.t, p.t, a);
+  const won = G.mode === 'win';
+  G.cam.frac = lerp(G.cam.frac, title ? 0.14 : won ? 0.3 : 0.27, Math.min(1, G.frameDt * 3));   // cat's height from the bottom
+  G.cam.d = id - G.cam.frac * H / TS;
+  // normally the chimney is centred; on the roof, pan sideways so the cat stays on screen
+  const baseGx = (W - CFG.GW * TS) / 2, bx = baseGx + (ix + 0.5) * TS;
+  G.cam.ox = lerp(G.cam.ox || 0, won ? clamp(bx, W * 0.25, W * 0.75) - bx : 0, Math.min(1, G.frameDt * 4));
+  G.cam.gx = Math.round(baseGx + G.cam.ox);
+  const hue = hueAt(lv, id + 4), pulse = Math.pow(1 - (beats() % 1), 3);
+
+  ctx.save();
+  if (G.shake > 0) { const s = G.shake * TS * 0.35; ctx.translate((Math.random() - 0.5) * s, (Math.random() - 0.5) * s); }
+  drawShaft(lv, hue, pulse, it);
+  drawMotes(lv);
+  if (!title) { drawFlags(); drawAttemptLabel(); }
+  if (G.mode !== 'dead' && !(G.mode === 'pause' && G.pauseFrom === 'dead')) drawPlayer(p, ix, id);
+  drawParticles();
+  ctx.restore();
+
+  if (title) drawTitle();
+  else if (won) { drawWin(); iconButton('sound', W - 14 * UI - 19 * UI, 14 * UI + 19 * UI, 19 * UI, () => setMuted(!muted)); }
+  else {
+    drawHUD();
+    if (G.mode === 'pause') drawPause();
+  }
+  drawVolumeToast();
+  drawConfetti();
+  // the whole picture sits on watercolour paper, darkening a little toward the edges of the page
+  multiply(PAT.paper, 0, 0, 0, 0, W, H, 1);
+  const vg = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.42, W / 2, H / 2, Math.max(W, H) * 0.78);
+  vg.addColorStop(0, 'rgba(255,255,255,0)'); vg.addColorStop(1, 'rgba(176,146,112,.55)');
+  ctx.save(); ctx.globalCompositeOperation = 'multiply'; ctx.fillStyle = vg; ctx.fillRect(0, 0, W, H); ctx.restore();
+}
+
+// ===== Main loop =====
+let last = performance.now();
+function frame(now) {
+  requestAnimationFrame(frame);
+  const raw = (now - last) / 1000;
+  last = now;
+  const dt = clamp(raw, 0, 0.1);
+  if (raw > 0.5 && G.mode === 'play') pause();   // e.g. the embed was scrolled out of view: don't resume mid-air
+  G.time += dt; G.frameDt = dt;
+  if (G.mode === 'title' && AC && AC.state === 'running' && !music.on) musicStart();   // menu music once audio is unlocked
+  if (G.mode === 'play' || G.mode === 'title') {
+    G.acc += dt;
+    while (G.acc >= CFG.DT) {
+      G.acc -= CFG.DT;
+      if (G.mode === 'play') { simStep(); if (G.mode !== 'play') { G.acc = 0; break; } }
+      else demoStep();
+    }
+  }
+  if (G.mode === 'dead') {
+    input.buffer = Math.max(0, input.buffer - dt);   // an early tap shouldn't fire a leap after respawning
+    if ((G.deadT += dt) > 0.75) spawn();
+  }
+  if (G.mode === 'win') { G.winT += dt; updateWinCat(); }
+  reanchorMusic();
+  musicTick();
+  updateFx(dt);
+  render();
+}
+
+// ===== Input =====
+const LEAP_KEYS = new Set(['Space', 'ArrowUp', 'ArrowDown', 'KeyW', 'KeyS', 'KeyZ']);
+const VOL_DOWN = new Set(['Minus', 'NumpadSubtract']), VOL_UP = new Set(['Equal', 'NumpadAdd']);
+addEventListener('keydown', e => {
+  const k = e.code;
+  if (LEAP_KEYS.has(k) || k.startsWith('Arrow') || k === 'Backspace') e.preventDefault();
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const ch = e.key && e.key.length === 1 && e.key < '\x7f' ? e.key.toLowerCase() : null;   // the character, on Latin layouts
+  const is = (c, code) => (ch ? ch === c : k === code);
+  const volDown = ch ? ch === '-' || ch === '_' : VOL_DOWN.has(k), volUp = ch ? ch === '=' || ch === '+' : VOL_UP.has(k);
+  if (volDown || volUp) { setMusicVol(musicVol + (volUp ? 0.1 : -0.1)); return; }   // repeats allowed
+  if (e.repeat) return;
+  initAudio();
+  if (is('m', 'KeyM')) { setMuted(!muted); return; }
+  switch (G.mode) {
+    case 'title':
+      if (LEAP_KEYS.has(k) || k === 'Enter') startRun(false);
+      else if (is('p', 'KeyP')) startRun(true);
+      else if (k === 'ArrowLeft') cycleSkin(-1);
+      else if (k === 'ArrowRight') cycleSkin(1);
+      return;
+    case 'pause':
+      if (k === 'Escape' || is('p', 'KeyP') || k === 'Enter' || LEAP_KEYS.has(k)) resume();
+      else if (is('q', 'KeyQ')) toMenu();
+      return;
+    case 'win':
+      if ((LEAP_KEYS.has(k) || k === 'Enter') && G.winT > winButtonsAt()) startRun(G.practice);
+      else if (k === 'Escape' && G.winT > winButtonsAt()) toMenu();
+      return;
+  }
+  if (k === 'Escape' || is('p', 'KeyP')) pause();
+  else if (is('f', 'KeyF')) placeFlag();
+  else if (is('x', 'KeyX') || k === 'Backspace') removeFlag();
+  else if (LEAP_KEYS.has(k)) { input.keys.add(k); input.buffer = 0.1; }
+});
+addEventListener('keyup', e => input.keys.delete(e.code));
+
+cvs.addEventListener('pointerdown', e => {
+  e.preventDefault();
+  cvs.focus({ preventScroll: true });
+  initAudio();
+  const x = e.offsetX, y = e.offsetY;
+  G.mx = x; G.my = y;
+  for (let i = G.buttons.length - 1; i >= 0; i--) {
+    const b = G.buttons[i];
+    if (!hit(b, x, y)) continue;
+    if (b.drag) {   // sliders: grab the knob, or jump to where the track was pressed
+      if (x >= b.tx0 && x <= b.tx1) { G.drag = b.id; b.drag(x); try { cvs.setPointerCapture(e.pointerId); } catch (err) {} }
+      return;
+    }
+    sfxBlip(); b.onTap(); return;
+  }
+  if (G.mode === 'play' || G.mode === 'dead') {
+    input.ptrs.add(e.pointerId); input.buffer = 0.1;
+    try { cvs.setPointerCapture(e.pointerId); } catch (err) {}
+  } else if (G.mode === 'title') startRun(false);
+});
+const release = e => { input.ptrs.delete(e.pointerId); G.drag = null; };
+cvs.addEventListener('pointerup', e => { release(e); initAudio(); });   // touch audio unlocks on release
+cvs.addEventListener('pointercancel', release);
+cvs.addEventListener('lostpointercapture', release);
+addEventListener('touchend', initAudio, { passive: true });
+cvs.addEventListener('pointermove', e => {
+  if (e.pointerType === 'mouse') { G.mx = e.offsetX; G.my = e.offsetY; }
+  if (G.drag) { const b = G.buttons.find(q => q.id === G.drag); if (b) b.drag(e.offsetX); }
+});
+cvs.addEventListener('pointerleave', () => { G.mx = G.my = -1; });
+cvs.addEventListener('contextmenu', e => e.preventDefault());
+addEventListener('blur', () => { input.keys.clear(); input.ptrs.clear(); G.drag = null; pause(); });
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { pause(); if (AC) AC.suspend(); }
+  else if (AC && G.mode !== 'pause') AC.resume();
+});
+addEventListener('storage', () => {   // keep stats in sync with other tabs of the same host page
+  G.attempts = Math.max(G.attempts, storedInt('attempts'));
+  G.best = Math.max(G.best, Math.min(100, storedInt('best')));
+  G.wins = Math.max(G.wins, storedInt('wins'));
+});
+addEventListener('resize', resize);
+
+resetDemo();
+resize();
+requestAnimationFrame(t => { last = t; frame(t); });
+</script>
+</body>
+</html>

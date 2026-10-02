@@ -1,0 +1,9 @@
+{
+  // Cloudflare Workers static-assets deployment for Impawsible Pizza.
+  // Deploy with: npx wrangler deploy
+  "name": "impawsible-pizza",
+  "compatibility_date": "2026-10-01",
+  "assets": {
+    "directory": "./public"
+  }
+}
